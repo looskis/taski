@@ -19,7 +19,7 @@ Anything else is rejected and remains incomplete. Shared reminder lists are not 
 ## Install with Homebrew
 
 ```sh
-brew install looskis/taski/taski
+brew install looskis/tap/taski
 taski setup
 brew services start taski
 taski status
