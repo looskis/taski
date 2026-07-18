@@ -88,13 +88,19 @@ public struct ReminderManager: Sendable {
     private func validate(_ draft: ReminderDraft) throws {
         try validateTitle(draft.title)
         try validateNotes(draft.notes)
-        try validateAlarms(draft.alarms)
+        try validateAlarms(draft.alarms, relative: draft.relativeAlarms, locations: draft.locationAlarms)
+        try validateLocation(draft.location); try validateURL(draft.url); try validateTimeZone(draft.timeZoneIdentifier); try validateRecurrence(draft.recurrence)
     }
 
     private func validate(_ patch: ReminderPatch) throws {
         if let title = patch.title { try validateTitle(title) }
         if case .set(let notes) = patch.notes { try validateNotes(notes) }
-        try validateAlarms(patch.addAlarms)
+        try validateAlarms(patch.addAlarms, relative: patch.addRelativeAlarms, locations: patch.addLocationAlarms)
+        if case .set(let location) = patch.location { try validateLocation(location) }
+        if case .set(let url) = patch.url { try validateURL(url) }
+        if case .set(let zone) = patch.timeZoneIdentifier { try validateTimeZone(zone) }
+        if let recurrence = patch.recurrence { try validateRecurrence(recurrence) }
+        if patch.clearRecurrence && patch.recurrence != nil { throw ProcessorError(code: "invalid_recurrence", message: "Cannot set and clear recurrence together.") }
     }
 
     private func validateTitle(_ title: String) throws {
@@ -102,8 +108,18 @@ public struct ReminderManager: Sendable {
         guard !title.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { throw ProcessorError(code: "invalid_title", message: "Title cannot contain control characters.") }
     }
 
-    private func validateAlarms(_ alarms: [Date]) throws {
-        guard alarms.count <= 10 else { throw ProcessorError(code: "too_many_alarms", message: "At most 10 alarms may be added at once.") }
+    private func validateAlarms(_ alarms: [Date], relative: [TimeInterval], locations: [ReminderLocationAlarmDraft]) throws {
+        guard alarms.count + relative.count + locations.count <= 10 else { throw ProcessorError(code: "too_many_alarms", message: "At most 10 alarms may be added at once.") }
+        guard relative.allSatisfy(\.isFinite) else { throw ProcessorError(code: "invalid_alarm_offset", message: "Relative alarm offsets must be finite seconds.") }
+        guard locations.allSatisfy({ (-90.0...90.0).contains($0.latitude) && (-180.0...180.0).contains($0.longitude) && $0.radiusMeters >= 0 && ["enter", "leave"].contains($0.proximity) }) else { throw ProcessorError(code: "invalid_location_alarm", message: "Location alarm coordinates, radius, or proximity are invalid.") }
+    }
+
+    private func validateLocation(_ location: String?) throws { guard (location?.count ?? 0) <= 500 else { throw ProcessorError(code: "location_too_long", message: "Location must be 500 characters or fewer.") } }
+    private func validateURL(_ url: URL?) throws { guard let url else { return }; guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) else { throw ProcessorError(code: "invalid_url", message: "URL must use http or https.") } }
+    private func validateTimeZone(_ identifier: String?) throws { guard let identifier else { return }; guard TimeZone(identifier: identifier) != nil else { throw ProcessorError(code: "invalid_timezone", message: "Use a valid IANA time zone identifier.") } }
+    private func validateRecurrence(_ rules: [ReminderRecurrence]) throws {
+        guard rules.count <= 1 else { throw ProcessorError(code: "invalid_recurrence", message: "Taski supports one recurrence rule per reminder.") }
+        for rule in rules { guard rule.interval > 0 else { throw ProcessorError(code: "invalid_recurrence", message: "Recurrence interval must be positive.") }; if case .occurrences(let count) = rule.end, count <= 0 { throw ProcessorError(code: "invalid_recurrence", message: "Recurrence count must be positive.") } }
     }
 
     private func validateNotes(_ notes: String?) throws {

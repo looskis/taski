@@ -13,10 +13,20 @@ public struct ReminderSnapshot: Equatable, Sendable {
     public let notes: String?
     public let isCompleted: Bool
     public let dueDate: Date?
+    public let dueDateIsAllDay: Bool
+    public let startDate: Date?
+    public let startDateIsAllDay: Bool
     public let priority: ReminderPriority
     public let alarms: [ReminderAlarm]
+    public let location: String?
+    public let url: URL?
+    public let timeZoneIdentifier: String?
+    public let recurrence: [ReminderRecurrence]
+    public let creationDate: Date?
+    public let lastModifiedDate: Date?
+    public let completionDate: Date?
 
-    public init(localIdentifier: String, externalIdentifier: String?, calendarIdentifier: String, sourceIdentifier: String, title: String, notes: String?, isCompleted: Bool = false, dueDate: Date? = nil, priority: ReminderPriority = .none, alarms: [ReminderAlarm] = []) {
+    public init(localIdentifier: String, externalIdentifier: String?, calendarIdentifier: String, sourceIdentifier: String, title: String, notes: String?, isCompleted: Bool = false, dueDate: Date? = nil, dueDateIsAllDay: Bool = false, startDate: Date? = nil, startDateIsAllDay: Bool = false, priority: ReminderPriority = .none, alarms: [ReminderAlarm] = [], location: String? = nil, url: URL? = nil, timeZoneIdentifier: String? = nil, recurrence: [ReminderRecurrence] = [], creationDate: Date? = nil, lastModifiedDate: Date? = nil, completionDate: Date? = nil) {
         self.localIdentifier = localIdentifier
         self.externalIdentifier = externalIdentifier
         self.calendarIdentifier = calendarIdentifier
@@ -25,8 +35,18 @@ public struct ReminderSnapshot: Equatable, Sendable {
         self.notes = notes
         self.isCompleted = isCompleted
         self.dueDate = dueDate
+        self.dueDateIsAllDay = dueDateIsAllDay
+        self.startDate = startDate
+        self.startDateIsAllDay = startDateIsAllDay
         self.priority = priority
         self.alarms = alarms
+        self.location = location
+        self.url = url
+        self.timeZoneIdentifier = timeZoneIdentifier
+        self.recurrence = recurrence
+        self.creationDate = creationDate
+        self.lastModifiedDate = lastModifiedDate
+        self.completionDate = completionDate
     }
 
     public var fingerprint: String {
@@ -52,6 +72,24 @@ public enum ReminderAlarm: Equatable, Sendable {
     case location(name: String?, latitude: Double?, longitude: Double?, radiusMeters: Double, proximity: String)
 }
 
+public enum ReminderRecurrenceFrequency: String, Sendable { case daily, weekly, monthly, yearly }
+public enum ReminderRecurrenceEnd: Equatable, Sendable { case never, date(Date), occurrences(Int) }
+public struct ReminderRecurrence: Equatable, Sendable {
+    public let frequency: ReminderRecurrenceFrequency
+    public let interval: Int
+    public let end: ReminderRecurrenceEnd
+    public init(frequency: ReminderRecurrenceFrequency, interval: Int = 1, end: ReminderRecurrenceEnd = .never) { self.frequency = frequency; self.interval = interval; self.end = end }
+}
+
+public struct ReminderLocationAlarmDraft: Equatable, Sendable {
+    public let name: String
+    public let latitude: Double
+    public let longitude: Double
+    public let radiusMeters: Double
+    public let proximity: String
+    public init(name: String, latitude: Double, longitude: Double, radiusMeters: Double, proximity: String) { self.name = name; self.latitude = latitude; self.longitude = longitude; self.radiusMeters = radiusMeters; self.proximity = proximity }
+}
+
 public enum ReminderFieldUpdate<Value: Sendable>: Sendable {
     case unchanged
     case set(Value)
@@ -66,10 +104,19 @@ public struct ReminderDraft: Sendable {
     public let title: String
     public let notes: String?
     public let dueDate: Date?
+    public let dueDateIsAllDay: Bool
+    public let startDate: Date?
+    public let startDateIsAllDay: Bool
     public let priority: ReminderPriority
     public let alarms: [Date]
-    public init(title: String, notes: String? = nil, dueDate: Date? = nil, priority: ReminderPriority = .none, alarms: [Date] = []) {
-        self.title = title; self.notes = notes; self.dueDate = dueDate; self.priority = priority; self.alarms = alarms
+    public let relativeAlarms: [TimeInterval]
+    public let locationAlarms: [ReminderLocationAlarmDraft]
+    public let location: String?
+    public let url: URL?
+    public let timeZoneIdentifier: String?
+    public let recurrence: [ReminderRecurrence]
+    public init(title: String, notes: String? = nil, dueDate: Date? = nil, dueDateIsAllDay: Bool = false, startDate: Date? = nil, startDateIsAllDay: Bool = false, priority: ReminderPriority = .none, alarms: [Date] = [], relativeAlarms: [TimeInterval] = [], locationAlarms: [ReminderLocationAlarmDraft] = [], location: String? = nil, url: URL? = nil, timeZoneIdentifier: String? = nil, recurrence: [ReminderRecurrence] = []) {
+        self.title = title; self.notes = notes; self.dueDate = dueDate; self.dueDateIsAllDay = dueDateIsAllDay; self.startDate = startDate; self.startDateIsAllDay = startDateIsAllDay; self.priority = priority; self.alarms = alarms; self.relativeAlarms = relativeAlarms; self.locationAlarms = locationAlarms; self.location = location; self.url = url; self.timeZoneIdentifier = timeZoneIdentifier; self.recurrence = recurrence
     }
 }
 
@@ -77,11 +124,21 @@ public struct ReminderPatch: Sendable {
     public let title: String?
     public let notes: ReminderFieldUpdate<String>
     public let dueDate: ReminderFieldUpdate<Date>
+    public let dueDateIsAllDay: Bool?
+    public let startDate: ReminderFieldUpdate<Date>
+    public let startDateIsAllDay: Bool?
     public let priority: ReminderPriority?
     public let addAlarms: [Date]
     public let clearAlarms: Bool
-    public init(title: String? = nil, notes: ReminderFieldUpdate<String> = .unchanged, dueDate: ReminderFieldUpdate<Date> = .unchanged, priority: ReminderPriority? = nil, addAlarms: [Date] = [], clearAlarms: Bool = false) {
-        self.title = title; self.notes = notes; self.dueDate = dueDate; self.priority = priority; self.addAlarms = addAlarms; self.clearAlarms = clearAlarms
+    public let addRelativeAlarms: [TimeInterval]
+    public let addLocationAlarms: [ReminderLocationAlarmDraft]
+    public let location: ReminderFieldUpdate<String>
+    public let url: ReminderFieldUpdate<URL>
+    public let timeZoneIdentifier: ReminderFieldUpdate<String>
+    public let recurrence: [ReminderRecurrence]?
+    public let clearRecurrence: Bool
+    public init(title: String? = nil, notes: ReminderFieldUpdate<String> = .unchanged, dueDate: ReminderFieldUpdate<Date> = .unchanged, dueDateIsAllDay: Bool? = nil, startDate: ReminderFieldUpdate<Date> = .unchanged, startDateIsAllDay: Bool? = nil, priority: ReminderPriority? = nil, addAlarms: [Date] = [], clearAlarms: Bool = false, addRelativeAlarms: [TimeInterval] = [], addLocationAlarms: [ReminderLocationAlarmDraft] = [], location: ReminderFieldUpdate<String> = .unchanged, url: ReminderFieldUpdate<URL> = .unchanged, timeZoneIdentifier: ReminderFieldUpdate<String> = .unchanged, recurrence: [ReminderRecurrence]? = nil, clearRecurrence: Bool = false) {
+        self.title = title; self.notes = notes; self.dueDate = dueDate; self.dueDateIsAllDay = dueDateIsAllDay; self.startDate = startDate; self.startDateIsAllDay = startDateIsAllDay; self.priority = priority; self.addAlarms = addAlarms; self.clearAlarms = clearAlarms; self.addRelativeAlarms = addRelativeAlarms; self.addLocationAlarms = addLocationAlarms; self.location = location; self.url = url; self.timeZoneIdentifier = timeZoneIdentifier; self.recurrence = recurrence; self.clearRecurrence = clearRecurrence
     }
 }
 

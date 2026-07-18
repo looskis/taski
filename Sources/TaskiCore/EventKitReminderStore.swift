@@ -1,5 +1,6 @@
 import EventKit
 import Foundation
+import CoreLocation
 
 public struct ReminderListDescriptor: Sendable {
     public let sourceIdentifier: String
@@ -52,9 +53,14 @@ public final class EventKitReminderStore: ReminderStore, ReminderCRUDStore, @unc
         reminder.calendar = calendar
         reminder.title = draft.title
         reminder.notes = draft.notes
-        reminder.dueDateComponents = draft.dueDate.map(dateComponents)
+        reminder.timeZone = draft.timeZoneIdentifier.flatMap(TimeZone.init(identifier:))
+        reminder.dueDateComponents = draft.dueDate.map { dateComponents($0, allDay: draft.dueDateIsAllDay, timeZone: reminder.timeZone) }
+        reminder.startDateComponents = draft.startDate.map { dateComponents($0, allDay: draft.startDateIsAllDay, timeZone: reminder.timeZone) }
         reminder.priority = draft.priority.rawValue
-        reminder.alarms = draft.alarms.map(EKAlarm.init(absoluteDate:))
+        reminder.location = draft.location
+        reminder.url = draft.url
+        reminder.alarms = draft.alarms.map(EKAlarm.init(absoluteDate:)) + draft.relativeAlarms.map(EKAlarm.init(relativeOffset:)) + draft.locationAlarms.map(locationAlarm)
+        reminder.recurrenceRules = draft.recurrence.map(recurrenceRule)
         try eventStore.save(reminder, commit: true)
         return snapshot(reminder)
     }
@@ -63,11 +69,21 @@ public final class EventKitReminderStore: ReminderStore, ReminderCRUDStore, @unc
         let reminder = try configuredReminder(localIdentifier: localIdentifier, calendarIdentifier: calendarIdentifier)
         if let title = patch.title { reminder.title = title }
         switch patch.notes { case .unchanged: break; case .set(let notes): reminder.notes = notes; case .clear: reminder.notes = nil }
-        switch patch.dueDate { case .unchanged: break; case .set(let date): reminder.dueDateComponents = dateComponents(date); case .clear: reminder.dueDateComponents = nil }
+        switch patch.timeZoneIdentifier { case .unchanged: break; case .set(let identifier): reminder.timeZone = TimeZone(identifier: identifier); case .clear: reminder.timeZone = nil }
+        if case .unchanged = patch.dueDate, var components = reminder.dueDateComponents, !isAllDay(components) { components.timeZone = reminder.timeZone; reminder.dueDateComponents = components }
+        if case .unchanged = patch.startDate, var components = reminder.startDateComponents, !isAllDay(components) { components.timeZone = reminder.timeZone; reminder.startDateComponents = components }
+        switch patch.dueDate { case .unchanged: break; case .set(let date): reminder.dueDateComponents = dateComponents(date, allDay: patch.dueDateIsAllDay ?? false, timeZone: reminder.timeZone); case .clear: reminder.dueDateComponents = nil }
+        switch patch.startDate { case .unchanged: break; case .set(let date): reminder.startDateComponents = dateComponents(date, allDay: patch.startDateIsAllDay ?? false, timeZone: reminder.timeZone); case .clear: reminder.startDateComponents = nil }
+        switch patch.location { case .unchanged: break; case .set(let value): reminder.location = value; case .clear: reminder.location = nil }
+        switch patch.url { case .unchanged: break; case .set(let value): reminder.url = value; case .clear: reminder.url = nil }
         if let priority = patch.priority { reminder.priority = priority.rawValue }
         var alarms = patch.clearAlarms ? [] : reminder.alarms ?? []
         alarms.append(contentsOf: patch.addAlarms.map(EKAlarm.init(absoluteDate:)))
+        alarms.append(contentsOf: patch.addRelativeAlarms.map(EKAlarm.init(relativeOffset:)))
+        alarms.append(contentsOf: patch.addLocationAlarms.map(locationAlarm))
         reminder.alarms = alarms
+        if patch.clearRecurrence { reminder.recurrenceRules = nil }
+        else if let recurrence = patch.recurrence { reminder.recurrenceRules = recurrence.map(recurrenceRule) }
         try eventStore.save(reminder, commit: true)
         return snapshot(reminder)
     }
@@ -130,6 +146,7 @@ public final class EventKitReminderStore: ReminderStore, ReminderCRUDStore, @unc
 
     private func snapshot(_ reminder: EKReminder) -> ReminderSnapshot {
         let dueDate = reminder.dueDateComponents.flatMap { Calendar.current.date(from: $0) }
+        let startDate = reminder.startDateComponents.flatMap { Calendar.current.date(from: $0) }
         let alarms: [ReminderAlarm] = (reminder.alarms ?? []).map { alarm in
             if let date = alarm.absoluteDate { return .absolute(date) }
             if let location = alarm.structuredLocation {
@@ -139,14 +156,46 @@ public final class EventKitReminderStore: ReminderStore, ReminderCRUDStore, @unc
             }
             return .relative(seconds: alarm.relativeOffset)
         }
-        return ReminderSnapshot(localIdentifier: reminder.calendarItemIdentifier, externalIdentifier: reminder.calendarItemExternalIdentifier, calendarIdentifier: reminder.calendar.calendarIdentifier, sourceIdentifier: reminder.calendar.source.sourceIdentifier, title: reminder.title, notes: reminder.notes, isCompleted: reminder.isCompleted, dueDate: dueDate, priority: ReminderPriority(rawValue: reminder.priority) ?? .none, alarms: alarms)
+        return ReminderSnapshot(localIdentifier: reminder.calendarItemIdentifier, externalIdentifier: reminder.calendarItemExternalIdentifier, calendarIdentifier: reminder.calendar.calendarIdentifier, sourceIdentifier: reminder.calendar.source.sourceIdentifier, title: reminder.title, notes: reminder.notes, isCompleted: reminder.isCompleted, dueDate: dueDate, dueDateIsAllDay: reminder.dueDateComponents.map(isAllDay) ?? false, startDate: startDate, startDateIsAllDay: reminder.startDateComponents.map(isAllDay) ?? false, priority: ReminderPriority(rawValue: reminder.priority) ?? .none, alarms: alarms, location: reminder.location, url: reminder.url, timeZoneIdentifier: reminder.timeZone?.identifier ?? reminder.dueDateComponents?.timeZone?.identifier, recurrence: (reminder.recurrenceRules ?? []).map(recurrenceSnapshot), creationDate: reminder.creationDate, lastModifiedDate: reminder.lastModifiedDate, completionDate: reminder.completionDate)
     }
 
-    private func dateComponents(_ date: Date) -> DateComponents {
-        var components = Calendar.current.dateComponents(in: TimeZone.current, from: date)
+    private func dateComponents(_ date: Date, allDay: Bool, timeZone: TimeZone?) -> DateComponents {
+        let zone = timeZone ?? TimeZone.current
+        var components = Calendar.current.dateComponents(in: zone, from: date)
+        if allDay { components.hour = nil; components.minute = nil; components.second = nil; components.nanosecond = nil }
         components.calendar = Calendar.current
-        components.timeZone = TimeZone.current
+        components.timeZone = allDay ? nil : zone
         return components
+    }
+
+    private func isAllDay(_ components: DateComponents) -> Bool { components.hour == nil && components.minute == nil && components.second == nil }
+
+    private func locationAlarm(_ draft: ReminderLocationAlarmDraft) -> EKAlarm {
+        let alarm = EKAlarm(relativeOffset: 0)
+        let location = EKStructuredLocation(title: draft.name)
+        location.geoLocation = CLLocation(latitude: draft.latitude, longitude: draft.longitude)
+        location.radius = draft.radiusMeters
+        alarm.structuredLocation = location
+        alarm.proximity = draft.proximity == "leave" ? .leave : .enter
+        return alarm
+    }
+
+    private func recurrenceRule(_ recurrence: ReminderRecurrence) -> EKRecurrenceRule {
+        let frequency: EKRecurrenceFrequency
+        switch recurrence.frequency { case .daily: frequency = .daily; case .weekly: frequency = .weekly; case .monthly: frequency = .monthly; case .yearly: frequency = .yearly }
+        let end: EKRecurrenceEnd?
+        switch recurrence.end { case .never: end = nil; case .date(let date): end = EKRecurrenceEnd(end: date); case .occurrences(let count): end = EKRecurrenceEnd(occurrenceCount: count) }
+        return EKRecurrenceRule(recurrenceWith: frequency, interval: recurrence.interval, end: end)
+    }
+
+    private func recurrenceSnapshot(_ rule: EKRecurrenceRule) -> ReminderRecurrence {
+        let frequency: ReminderRecurrenceFrequency
+        switch rule.frequency { case .daily: frequency = .daily; case .weekly: frequency = .weekly; case .monthly: frequency = .monthly; case .yearly: frequency = .yearly; @unknown default: frequency = .daily }
+        let end: ReminderRecurrenceEnd
+        if let recurrenceEnd = rule.recurrenceEnd, let date = recurrenceEnd.endDate { end = .date(date) }
+        else if let recurrenceEnd = rule.recurrenceEnd, recurrenceEnd.occurrenceCount > 0 { end = .occurrences(recurrenceEnd.occurrenceCount) }
+        else { end = .never }
+        return ReminderRecurrence(frequency: frequency, interval: rule.interval, end: end)
     }
 
     private static func sourceType(_ type: EKSourceType) -> String {

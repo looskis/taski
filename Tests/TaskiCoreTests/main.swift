@@ -112,8 +112,9 @@ struct BehavioralTests {
         let due = Date(timeIntervalSince1970: 1_800_000_000)
         let alarm = Date(timeIntervalSince1970: 1_799_996_400)
 
-        let created = try await manager.create(ReminderDraft(title: "report system", notes: "weekly", dueDate: due, priority: .high, alarms: [alarm]))
-        try expect(created.title == "report system" && created.priority == .high, "create should persist typed reminder fields")
+        let recurrence = ReminderRecurrence(frequency: .weekly, interval: 2, end: .occurrences(4))
+        let created = try await manager.create(ReminderDraft(title: "report system", notes: "weekly", dueDate: due, startDate: alarm, priority: .high, alarms: [alarm], relativeAlarms: [-900], locationAlarms: [.init(name: "Office", latitude: 34.05, longitude: -118.24, radiusMeters: 100, proximity: "enter")], url: URL(string: "https://example.com"), timeZoneIdentifier: "America/Los_Angeles", recurrence: [recurrence]))
+        try expect(created.title == "report system" && created.priority == .high && created.startDate == alarm && created.url?.host == "example.com" && created.recurrence == [recurrence] && created.alarms.count == 3, "create should persist public EventKit reminder fields")
         let initialList = try await manager.list(includeCompleted: false)
         let shown = try await manager.show(identifier: created.localIdentifier)
         try expect(initialList.count == 1, "list should return configured-inbox reminders")
@@ -169,18 +170,18 @@ actor FakeCRUDReminderStore: ReminderCRUDStore {
     func authorizationStatus() async -> ReminderAuthorization { .fullAccess }
     func fetchAll(calendarIdentifier: String) async throws -> [ReminderSnapshot] { reminders.filter { $0.calendarIdentifier == calendarIdentifier } }
     func create(calendarIdentifier: String, sourceIdentifier: String, draft: ReminderDraft) async throws -> ReminderSnapshot {
-        let reminder = ReminderSnapshot(localIdentifier: UUID().uuidString, externalIdentifier: UUID().uuidString, calendarIdentifier: calendarIdentifier, sourceIdentifier: sourceIdentifier, title: draft.title, notes: draft.notes, isCompleted: false, dueDate: draft.dueDate, priority: draft.priority, alarms: draft.alarms.map(ReminderAlarm.absolute))
+        let reminder = ReminderSnapshot(localIdentifier: UUID().uuidString, externalIdentifier: UUID().uuidString, calendarIdentifier: calendarIdentifier, sourceIdentifier: sourceIdentifier, title: draft.title, notes: draft.notes, isCompleted: false, dueDate: draft.dueDate, dueDateIsAllDay: draft.dueDateIsAllDay, startDate: draft.startDate, startDateIsAllDay: draft.startDateIsAllDay, priority: draft.priority, alarms: draft.alarms.map(ReminderAlarm.absolute) + draft.relativeAlarms.map { .relative(seconds: $0) } + draft.locationAlarms.map { .location(name: $0.name, latitude: $0.latitude, longitude: $0.longitude, radiusMeters: $0.radiusMeters, proximity: $0.proximity) }, location: draft.location, url: draft.url, timeZoneIdentifier: draft.timeZoneIdentifier, recurrence: draft.recurrence)
         reminders.append(reminder); return reminder
     }
     func update(localIdentifier: String, calendarIdentifier: String, patch: ReminderPatch) async throws -> ReminderSnapshot {
         guard let index = reminders.firstIndex(where: { $0.localIdentifier == localIdentifier && $0.calendarIdentifier == calendarIdentifier }) else { throw ProcessorError(code: "reminder_missing", message: "missing") }
         let old = reminders[index]
-        reminders[index] = ReminderSnapshot(localIdentifier: old.localIdentifier, externalIdentifier: old.externalIdentifier, calendarIdentifier: old.calendarIdentifier, sourceIdentifier: old.sourceIdentifier, title: patch.title ?? old.title, notes: patch.notes.applying(to: old.notes), isCompleted: old.isCompleted, dueDate: patch.dueDate.applying(to: old.dueDate), priority: patch.priority ?? old.priority, alarms: (patch.clearAlarms ? [] : old.alarms) + patch.addAlarms.map(ReminderAlarm.absolute)); return reminders[index]
+        reminders[index] = ReminderSnapshot(localIdentifier: old.localIdentifier, externalIdentifier: old.externalIdentifier, calendarIdentifier: old.calendarIdentifier, sourceIdentifier: old.sourceIdentifier, title: patch.title ?? old.title, notes: patch.notes.applying(to: old.notes), isCompleted: old.isCompleted, dueDate: patch.dueDate.applying(to: old.dueDate), dueDateIsAllDay: patch.dueDateIsAllDay ?? old.dueDateIsAllDay, startDate: patch.startDate.applying(to: old.startDate), startDateIsAllDay: patch.startDateIsAllDay ?? old.startDateIsAllDay, priority: patch.priority ?? old.priority, alarms: (patch.clearAlarms ? [] : old.alarms) + patch.addAlarms.map(ReminderAlarm.absolute) + patch.addRelativeAlarms.map { .relative(seconds: $0) } + patch.addLocationAlarms.map { .location(name: $0.name, latitude: $0.latitude, longitude: $0.longitude, radiusMeters: $0.radiusMeters, proximity: $0.proximity) }, location: patch.location.applying(to: old.location), url: patch.url.applying(to: old.url), timeZoneIdentifier: patch.timeZoneIdentifier.applying(to: old.timeZoneIdentifier), recurrence: patch.clearRecurrence ? [] : patch.recurrence ?? old.recurrence, creationDate: old.creationDate, lastModifiedDate: old.lastModifiedDate, completionDate: old.completionDate); return reminders[index]
     }
     func setCompleted(localIdentifier: String, calendarIdentifier: String, completed: Bool) async throws -> ReminderSnapshot {
         guard let index = reminders.firstIndex(where: { $0.localIdentifier == localIdentifier && $0.calendarIdentifier == calendarIdentifier }) else { throw ProcessorError(code: "reminder_missing", message: "missing") }
         let old = reminders[index]
-        reminders[index] = ReminderSnapshot(localIdentifier: old.localIdentifier, externalIdentifier: old.externalIdentifier, calendarIdentifier: old.calendarIdentifier, sourceIdentifier: old.sourceIdentifier, title: old.title, notes: old.notes, isCompleted: completed, dueDate: old.dueDate, priority: old.priority, alarms: old.alarms); return reminders[index]
+        reminders[index] = ReminderSnapshot(localIdentifier: old.localIdentifier, externalIdentifier: old.externalIdentifier, calendarIdentifier: old.calendarIdentifier, sourceIdentifier: old.sourceIdentifier, title: old.title, notes: old.notes, isCompleted: completed, dueDate: old.dueDate, dueDateIsAllDay: old.dueDateIsAllDay, startDate: old.startDate, startDateIsAllDay: old.startDateIsAllDay, priority: old.priority, alarms: old.alarms, location: old.location, url: old.url, timeZoneIdentifier: old.timeZoneIdentifier, recurrence: old.recurrence, creationDate: old.creationDate, lastModifiedDate: old.lastModifiedDate, completionDate: completed ? Date() : nil); return reminders[index]
     }
     func delete(localIdentifier: String, calendarIdentifier: String) async throws {
         guard let index = reminders.firstIndex(where: { $0.localIdentifier == localIdentifier && $0.calendarIdentifier == calendarIdentifier }) else { throw ProcessorError(code: "reminder_missing", message: "missing") }
@@ -189,6 +190,6 @@ actor FakeCRUDReminderStore: ReminderCRUDStore {
     func changeLocalIdentifier(from: String, to: String) {
         guard let index = reminders.firstIndex(where: { $0.localIdentifier == from }) else { return }
         let old = reminders[index]
-        reminders[index] = ReminderSnapshot(localIdentifier: to, externalIdentifier: old.externalIdentifier, calendarIdentifier: old.calendarIdentifier, sourceIdentifier: old.sourceIdentifier, title: old.title, notes: old.notes, isCompleted: old.isCompleted, dueDate: old.dueDate, priority: old.priority, alarms: old.alarms)
+        reminders[index] = ReminderSnapshot(localIdentifier: to, externalIdentifier: old.externalIdentifier, calendarIdentifier: old.calendarIdentifier, sourceIdentifier: old.sourceIdentifier, title: old.title, notes: old.notes, isCompleted: old.isCompleted, dueDate: old.dueDate, dueDateIsAllDay: old.dueDateIsAllDay, startDate: old.startDate, startDateIsAllDay: old.startDateIsAllDay, priority: old.priority, alarms: old.alarms, location: old.location, url: old.url, timeZoneIdentifier: old.timeZoneIdentifier, recurrence: old.recurrence, creationDate: old.creationDate, lastModifiedDate: old.lastModifiedDate, completionDate: old.completionDate)
     }
 }

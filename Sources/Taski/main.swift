@@ -96,9 +96,13 @@ struct TaskiCLI {
         let remainder = Array(arguments.dropFirst())
         switch command {
         case "create":
-            let options = try CLIOptions(remainder, values: ["--title", "--notes", "--due", "--priority", "--alarm"], flags: [])
+            let options = try CLIOptions(remainder, values: ["--title", "--notes", "--due", "--due-date", "--start", "--timezone", "--priority", "--alarm", "--alarm-relative", "--alarm-location", "--url", "--repeat", "--repeat-interval", "--repeat-count", "--repeat-until"], flags: [])
             let title = try options.required("--title")
-            let draft = ReminderDraft(title: title, notes: try options.single("--notes"), dueDate: try options.single("--due").map(parseDate), priority: try options.single("--priority").map(parsePriority) ?? .none, alarms: try options.all("--alarm").map(parseDate))
+            try options.requireExclusive("--due", "--due-date")
+            let zone = try options.single("--timezone")
+            let dueDate = try options.single("--due").map(parseDate) ?? options.single("--due-date").map { try parseAllDay($0, timeZoneIdentifier: zone) }
+            let startDate = try options.single("--start").map(parseDate)
+            let draft = ReminderDraft(title: title, notes: try options.single("--notes"), dueDate: dueDate, dueDateIsAllDay: options.contains("--due-date"), startDate: startDate, priority: try options.single("--priority").map(parsePriority) ?? .none, alarms: try options.all("--alarm").map(parseDate), relativeAlarms: try options.all("--alarm-relative").map(parseOffset), locationAlarms: try options.all("--alarm-location").map(parseLocationAlarm), url: try options.single("--url").map(parseURL), timeZoneIdentifier: zone, recurrence: try parseRecurrence(options).map { [$0] } ?? [])
             printReminder(try await manager.create(draft))
         case "list":
             let options = try CLIOptions(remainder, values: [], flags: ["--all"])
@@ -110,13 +114,22 @@ struct TaskiCLI {
             printReminder(try await manager.show(identifier: remainder[0]))
         case "edit":
             guard let identifier = remainder.first, !identifier.hasPrefix("--") else { throw usage("edit requires a reminder or task ID") }
-            let options = try CLIOptions(Array(remainder.dropFirst()), values: ["--title", "--notes", "--due", "--priority", "--alarm"], flags: ["--clear-notes", "--clear-due", "--clear-alarms"])
+            let options = try CLIOptions(Array(remainder.dropFirst()), values: ["--title", "--notes", "--due", "--due-date", "--start", "--timezone", "--priority", "--alarm", "--alarm-relative", "--alarm-location", "--url", "--repeat", "--repeat-interval", "--repeat-count", "--repeat-until"], flags: ["--clear-notes", "--clear-due", "--clear-start", "--clear-alarms", "--clear-url", "--clear-timezone", "--clear-repeat"])
             guard options.hasMutation else { throw usage("edit requires at least one field option") }
             if options.has("--clear-notes") && options.contains("--notes") { throw usage("use either --notes or --clear-notes") }
-            if options.has("--clear-due") && options.contains("--due") { throw usage("use either --due or --clear-due") }
+            if options.has("--clear-due") && (options.contains("--due") || options.contains("--due-date")) { throw usage("use either a due value or --clear-due") }
+            if options.has("--clear-start") && options.contains("--start") { throw usage("use either --start or --clear-start") }
+            try options.requireExclusive("--due", "--due-date")
             let notes: ReminderFieldUpdate<String> = options.has("--clear-notes") ? .clear : try options.single("--notes").map(ReminderFieldUpdate.set) ?? .unchanged
-            let dueDate: ReminderFieldUpdate<Date> = options.has("--clear-due") ? .clear : try options.single("--due").map { .set(try parseDate($0)) } ?? .unchanged
-            let patch = ReminderPatch(title: try options.single("--title"), notes: notes, dueDate: dueDate, priority: try options.single("--priority").map(parsePriority), addAlarms: try options.all("--alarm").map(parseDate), clearAlarms: options.has("--clear-alarms"))
+            let zone = try options.single("--timezone")
+            let dueValue = try options.single("--due").map(parseDate) ?? options.single("--due-date").map { try parseAllDay($0, timeZoneIdentifier: zone) }
+            let startValue = try options.single("--start").map(parseDate)
+            let dueDate: ReminderFieldUpdate<Date> = options.has("--clear-due") ? .clear : dueValue.map(ReminderFieldUpdate.set) ?? .unchanged
+            let startDate: ReminderFieldUpdate<Date> = options.has("--clear-start") ? .clear : startValue.map(ReminderFieldUpdate.set) ?? .unchanged
+            let url: ReminderFieldUpdate<URL> = options.has("--clear-url") ? .clear : try options.single("--url").map { .set(try parseURL($0)) } ?? .unchanged
+            let timeZone: ReminderFieldUpdate<String> = options.has("--clear-timezone") ? .clear : zone.map(ReminderFieldUpdate.set) ?? .unchanged
+            let recurrence = try parseRecurrence(options).map { [$0] }
+            let patch = ReminderPatch(title: try options.single("--title"), notes: notes, dueDate: dueDate, dueDateIsAllDay: options.contains("--due-date") ? true : options.contains("--due") ? false : nil, startDate: startDate, startDateIsAllDay: options.contains("--start") ? false : nil, priority: try options.single("--priority").map(parsePriority), addAlarms: try options.all("--alarm").map(parseDate), clearAlarms: options.has("--clear-alarms"), addRelativeAlarms: try options.all("--alarm-relative").map(parseOffset), addLocationAlarms: try options.all("--alarm-location").map(parseLocationAlarm), url: url, timeZoneIdentifier: timeZone, recurrence: recurrence, clearRecurrence: options.has("--clear-repeat"))
             printReminder(try await manager.edit(identifier: identifier, patch: patch))
         case "complete", "reopen":
             guard remainder.count == 1 else { throw usage("\(command) requires one reminder or task ID") }
@@ -217,9 +230,37 @@ struct TaskiCLI {
         guard let priority = ["none": ReminderPriority.none, "low": .low, "medium": .medium, "high": .high][value.lowercased()] else { throw ProcessorError(code: "invalid_priority", message: "Priority must be none, low, medium, or high.") }
         return priority
     }
+    static func parseAllDay(_ value: String, timeZoneIdentifier: String?) throws -> Date {
+        let parts = value.split(separator: "-"); guard parts.count == 3, let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2]) else { throw ProcessorError(code: "invalid_date", message: "Use YYYY-MM-DD for an all-day date.") }
+        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = try parseTimeZone(timeZoneIdentifier)
+        guard let date = calendar.date(from: DateComponents(year: year, month: month, day: day)) else { throw ProcessorError(code: "invalid_date", message: "The all-day date is invalid.") }; return date
+    }
+    static func parseTimeZone(_ identifier: String?) throws -> TimeZone {
+        guard let identifier else { return .current }; guard let zone = TimeZone(identifier: identifier) else { throw ProcessorError(code: "invalid_timezone", message: "Use an IANA time zone such as America/Los_Angeles.") }; return zone
+    }
+    static func parseURL(_ value: String) throws -> URL { guard let url = URL(string: value), let scheme = url.scheme, ["https", "http"].contains(scheme.lowercased()) else { throw ProcessorError(code: "invalid_url", message: "URL must use http or https.") }; return url }
+    static func parseOffset(_ value: String) throws -> TimeInterval { guard let seconds = Double(value), seconds.isFinite else { throw ProcessorError(code: "invalid_alarm_offset", message: "Relative alarm offset must be seconds, usually negative.") }; return seconds }
+    static func parseLocationAlarm(_ value: String) throws -> ReminderLocationAlarmDraft {
+        let parts = value.split(separator: ",", maxSplits: 4).map(String.init)
+        guard parts.count == 5, ["enter", "leave"].contains(parts[0]), let latitude = Double(parts[1]), let longitude = Double(parts[2]), let radius = Double(parts[3]) else { throw ProcessorError(code: "invalid_location_alarm", message: "Use enter|leave,LATITUDE,LONGITUDE,RADIUS_METERS,NAME.") }
+        return ReminderLocationAlarmDraft(name: parts[4], latitude: latitude, longitude: longitude, radiusMeters: radius, proximity: parts[0])
+    }
+    fileprivate static func parseRecurrence(_ options: CLIOptions) throws -> ReminderRecurrence? {
+        guard let raw = try options.single("--repeat") else {
+            if options.contains("--repeat-interval") || options.contains("--repeat-count") || options.contains("--repeat-until") { throw usage("--repeat is required with recurrence options") }; return nil
+        }
+        guard let frequency = ReminderRecurrenceFrequency(rawValue: raw.lowercased()) else { throw ProcessorError(code: "invalid_recurrence", message: "Repeat must be daily, weekly, monthly, or yearly.") }
+        let interval = try options.single("--repeat-interval").flatMap(Int.init) ?? 1; guard interval > 0 else { throw ProcessorError(code: "invalid_recurrence", message: "Repeat interval must be positive.") }
+        try options.requireExclusive("--repeat-count", "--repeat-until")
+        let end: ReminderRecurrenceEnd
+        if let count = try options.single("--repeat-count").flatMap(Int.init) { guard count > 0 else { throw ProcessorError(code: "invalid_recurrence", message: "Repeat count must be positive.") }; end = .occurrences(count) }
+        else if let until = try options.single("--repeat-until") { end = .date(try parseDate(until)) }
+        else { end = .never }
+        return ReminderRecurrence(frequency: frequency, interval: interval, end: end)
+    }
     static func printReminder(_ reminder: ReminderSnapshot) {
         let formatter = ISO8601DateFormatter()
-        print("id: \(reminder.localIdentifier)\nexternal_id: \(reminder.externalIdentifier ?? "none")\nstate: \(reminder.isCompleted ? "completed" : "incomplete")\ntitle: \(safeText(reminder.title))\nnotes: \(reminder.notes.map(safeText) ?? "none")\ndue: \(reminder.dueDate.map(formatter.string) ?? "none")\npriority: \(String(describing: reminder.priority))")
+        print("reminder_id: \(reminder.localIdentifier)\nexternal_id: \(reminder.externalIdentifier ?? "none")\nstate: \(reminder.isCompleted ? "completed" : "incomplete")\ntitle: \(safeText(reminder.title))\nnotes: \(reminder.notes.map(safeText) ?? "none")\nstart: \(reminder.startDate.map(formatter.string) ?? "none")\nstart_all_day: \(reminder.startDateIsAllDay)\ndue: \(reminder.dueDate.map(formatter.string) ?? "none")\ndue_all_day: \(reminder.dueDateIsAllDay)\ntimezone: \(reminder.timeZoneIdentifier ?? "floating/system")\nlocation: \(reminder.location.map(safeText) ?? "none")\nurl: \(reminder.url?.absoluteString ?? "none")\npriority: \(String(describing: reminder.priority))\ncreated: \(reminder.creationDate.map(formatter.string) ?? "unknown")\nmodified: \(reminder.lastModifiedDate.map(formatter.string) ?? "unknown")\ncompleted_at: \(reminder.completionDate.map(formatter.string) ?? "none")")
         if reminder.alarms.isEmpty { print("alarms: none") }
         else {
             for alarm in reminder.alarms {
@@ -233,7 +274,10 @@ struct TaskiCLI {
                 }
             }
         }
+        if reminder.recurrence.isEmpty { print("recurrence: none") }
+        for rule in reminder.recurrence { print("recurrence: \(rule.frequency.rawValue) interval=\(rule.interval) end=\(recurrenceEndText(rule.end, formatter: formatter))") }
     }
+    static func recurrenceEndText(_ end: ReminderRecurrenceEnd, formatter: ISO8601DateFormatter) -> String { switch end { case .never: return "never"; case .date(let date): return formatter.string(from: date); case .occurrences(let count): return "count:\(count)" } }
     static func usage(_ detail: String) -> ProcessorError { ProcessorError(code: "invalid_arguments", message: "\(detail). Use `taski reminder help`.") }
     static func safeText(_ value: String) -> String {
         value.unicodeScalars.map { scalar in
@@ -261,17 +305,30 @@ struct TaskiCLI {
     static func reminderHelp() { print("""
     taski reminder — manage only the configured inbox
 
-      create --title TEXT [--notes TEXT] [--due RFC3339] [--priority LEVEL] [--alarm RFC3339 ...]
+      create --title TEXT [FIELD OPTIONS]
       list [--all]
       show REMINDER_OR_TASK_ID
-      edit REMINDER_OR_TASK_ID [--title TEXT] [--notes TEXT|--clear-notes]
-           [--due RFC3339|--clear-due] [--priority LEVEL]
-           [--alarm RFC3339 ...] [--clear-alarms]
+      edit REMINDER_OR_TASK_ID [FIELD OPTIONS]
       complete REMINDER_OR_TASK_ID
       reopen REMINDER_OR_TASK_ID
       delete REMINDER_OR_TASK_ID [--yes]
 
-    Priorities: none, low, medium, high. Alarms are absolute date/time alarms.
+    Field options:
+      --notes TEXT | --clear-notes
+      --due RFC3339 | --due-date YYYY-MM-DD | --clear-due
+      --start RFC3339 | --clear-start
+      --timezone IANA | --clear-timezone
+      --url HTTP_URL | --clear-url
+      --priority none|low|medium|high
+      --alarm RFC3339
+      --alarm-relative SECONDS
+      --alarm-location 'enter|leave,LAT,LON,RADIUS_METERS,NAME'
+      --clear-alarms
+      --repeat daily|weekly|monthly|yearly [--repeat-interval N]
+               [--repeat-count N | --repeat-until RFC3339]
+      --clear-repeat
+
+    Alarm options may be repeated. Clear options are valid for edit only.
     """) }
 }
 
@@ -298,4 +355,5 @@ private struct CLIOptions {
         let values = all(name); guard values.count <= 1 else { throw TaskiCLI.usage("\(name) may be supplied only once") }; return values.first
     }
     func required(_ name: String) throws -> String { guard let value = try single(name) else { throw TaskiCLI.usage("\(name) is required") }; return value }
+    func requireExclusive(_ first: String, _ second: String) throws { if contains(first) && contains(second) { throw TaskiCLI.usage("use either \(first) or \(second)") } }
 }
