@@ -1,6 +1,6 @@
 # Taski
 
-Taski is a per-user macOS background app that turns one dedicated iCloud Reminders list into a strict, durable task inbox. It uses public EventKit APIs, never evaluates reminder text as shell code, records state changes in SQLite, and completes a reminder only after its processor succeeds.
+Taski is a per-user macOS background daemon and CLI that turns one dedicated iCloud Reminders list into a strict, durable task inbox. It has no graphical Mac app. The headless `.app` bundle exists only to give the daemon a stable signed identity for macOS Reminders permission and LaunchAgent execution. Taski uses public EventKit APIs, never evaluates reminder text as shell code, records state changes in SQLite, and completes a reminder only after its processor succeeds.
 
 Version 1 supports:
 
@@ -69,7 +69,7 @@ taski reminder delete REMINDER_OR_TASK_ID       # interactive confirmation
 taski reminder delete REMINDER_OR_TASK_ID --yes # non-interactive
 ```
 
-Timed dates and alarms use RFC 3339 timestamps with an explicit offset; all-day due dates use `YYYY-MM-DD`. Taski supports timed starts, timed/all-day due dates, IANA time zones, HTTP(S) URLs, priorities, absolute/relative/geofence alarms, and simple daily/weekly/monthly/yearly recurrence with interval and count/date endings. `taski reminder help` is the authoritative field-option reference. Reads also display creation, modification, and completion timestamps. Editing an incomplete reminder—not its ledger row—is the supported way to change task content, and the daemon reparses it through its normal safety policy. Reopening a successfully processed reminder explicitly retires its old ledger generation so the reopened content can be classified as a new task.
+Timed dates and alarms use RFC 3339 timestamps with an explicit offset; all-day due dates use `YYYY-MM-DD`. Taski supports timed starts, timed/all-day due dates, IANA time zones, HTTP(S) URLs, priorities, absolute/relative/geofence alarms, and simple daily/weekly/monthly/yearly recurrence with interval and count/date endings. Relative alarms require a start date, and recurrence requires a start or due date. Advanced recurrence rules created by another client are preserved by unrelated edits but reported as unsupported rather than displayed as a misleading simple rule. `taski reminder help` is the authoritative field-option reference. Reads also display creation, modification, and completion timestamps. Editing an incomplete reminder—not its ledger row—is the supported way to change task content, and the daemon reparses it through its normal safety policy. Reopening a successfully processed reminder explicitly retires its old ledger generation so the reopened content can be classified as a new task.
 
 Taski intentionally does not expose list moves through reminder CRUD because every mutation is constrained to the configured inbox. Native Apple tags, flags, attachments, subtasks, Smart Lists, grocery categorization, and assignment controls are not available through the public EventKit reminder API.
 

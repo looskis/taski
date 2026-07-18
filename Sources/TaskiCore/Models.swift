@@ -78,7 +78,8 @@ public struct ReminderRecurrence: Equatable, Sendable {
     public let frequency: ReminderRecurrenceFrequency
     public let interval: Int
     public let end: ReminderRecurrenceEnd
-    public init(frequency: ReminderRecurrenceFrequency, interval: Int = 1, end: ReminderRecurrenceEnd = .never) { self.frequency = frequency; self.interval = interval; self.end = end }
+    public let isSimple: Bool
+    public init(frequency: ReminderRecurrenceFrequency, interval: Int = 1, end: ReminderRecurrenceEnd = .never, isSimple: Bool = true) { self.frequency = frequency; self.interval = interval; self.end = end; self.isSimple = isSimple }
 }
 
 public struct ReminderLocationAlarmDraft: Equatable, Sendable {

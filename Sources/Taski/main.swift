@@ -100,7 +100,7 @@ struct TaskiCLI {
             let title = try options.required("--title")
             try options.requireExclusive("--due", "--due-date")
             let zone = try options.single("--timezone")
-            let dueDate = try options.single("--due").map(parseDate) ?? options.single("--due-date").map { try parseAllDay($0, timeZoneIdentifier: zone) }
+            let dueDate = try options.single("--due").map(parseDate) ?? options.single("--due-date").map(parseAllDay)
             let startDate = try options.single("--start").map(parseDate)
             let draft = ReminderDraft(title: title, notes: try options.single("--notes"), dueDate: dueDate, dueDateIsAllDay: options.contains("--due-date"), startDate: startDate, priority: try options.single("--priority").map(parsePriority) ?? .none, alarms: try options.all("--alarm").map(parseDate), relativeAlarms: try options.all("--alarm-relative").map(parseOffset), locationAlarms: try options.all("--alarm-location").map(parseLocationAlarm), url: try options.single("--url").map(parseURL), timeZoneIdentifier: zone, recurrence: try parseRecurrence(options).map { [$0] } ?? [])
             printReminder(try await manager.create(draft))
@@ -119,10 +119,13 @@ struct TaskiCLI {
             if options.has("--clear-notes") && options.contains("--notes") { throw usage("use either --notes or --clear-notes") }
             if options.has("--clear-due") && (options.contains("--due") || options.contains("--due-date")) { throw usage("use either a due value or --clear-due") }
             if options.has("--clear-start") && options.contains("--start") { throw usage("use either --start or --clear-start") }
+            if options.has("--clear-url") && options.contains("--url") { throw usage("use either --url or --clear-url") }
+            if options.has("--clear-timezone") && options.contains("--timezone") { throw usage("use either --timezone or --clear-timezone") }
+            if options.has("--clear-repeat") && options.contains("--repeat") { throw usage("use either --repeat or --clear-repeat") }
             try options.requireExclusive("--due", "--due-date")
             let notes: ReminderFieldUpdate<String> = options.has("--clear-notes") ? .clear : try options.single("--notes").map(ReminderFieldUpdate.set) ?? .unchanged
             let zone = try options.single("--timezone")
-            let dueValue = try options.single("--due").map(parseDate) ?? options.single("--due-date").map { try parseAllDay($0, timeZoneIdentifier: zone) }
+            let dueValue = try options.single("--due").map(parseDate) ?? options.single("--due-date").map(parseAllDay)
             let startValue = try options.single("--start").map(parseDate)
             let dueDate: ReminderFieldUpdate<Date> = options.has("--clear-due") ? .clear : dueValue.map(ReminderFieldUpdate.set) ?? .unchanged
             let startDate: ReminderFieldUpdate<Date> = options.has("--clear-start") ? .clear : startValue.map(ReminderFieldUpdate.set) ?? .unchanged
@@ -230,15 +233,20 @@ struct TaskiCLI {
         guard let priority = ["none": ReminderPriority.none, "low": .low, "medium": .medium, "high": .high][value.lowercased()] else { throw ProcessorError(code: "invalid_priority", message: "Priority must be none, low, medium, or high.") }
         return priority
     }
-    static func parseAllDay(_ value: String, timeZoneIdentifier: String?) throws -> Date {
+    static func parseAllDay(_ value: String) throws -> Date {
+        let bytes = Array(value.utf8)
+        guard bytes.count == 10, bytes[4] == 45, bytes[7] == 45, bytes.enumerated().allSatisfy({ index, byte in index == 4 || index == 7 || (48...57).contains(byte) }) else { throw ProcessorError(code: "invalid_date", message: "Use exactly YYYY-MM-DD for an all-day date.") }
         let parts = value.split(separator: "-"); guard parts.count == 3, let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2]) else { throw ProcessorError(code: "invalid_date", message: "Use YYYY-MM-DD for an all-day date.") }
-        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = try parseTimeZone(timeZoneIdentifier)
-        guard let date = calendar.date(from: DateComponents(year: year, month: month, day: day)) else { throw ProcessorError(code: "invalid_date", message: "The all-day date is invalid.") }; return date
+        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        guard let date = calendar.date(from: DateComponents(year: year, month: month, day: day)) else { throw ProcessorError(code: "invalid_date", message: "The all-day date is invalid.") }
+        let check = calendar.dateComponents([.year, .month, .day], from: date)
+        guard check.year == year, check.month == month, check.day == day else { throw ProcessorError(code: "invalid_date", message: "The all-day date is invalid.") }
+        return date
     }
     static func parseTimeZone(_ identifier: String?) throws -> TimeZone {
         guard let identifier else { return .current }; guard let zone = TimeZone(identifier: identifier) else { throw ProcessorError(code: "invalid_timezone", message: "Use an IANA time zone such as America/Los_Angeles.") }; return zone
     }
-    static func parseURL(_ value: String) throws -> URL { guard let url = URL(string: value), let scheme = url.scheme, ["https", "http"].contains(scheme.lowercased()) else { throw ProcessorError(code: "invalid_url", message: "URL must use http or https.") }; return url }
+    static func parseURL(_ value: String) throws -> URL { guard let url = URL(string: value), let scheme = url.scheme, ["https", "http"].contains(scheme.lowercased()), let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else { throw ProcessorError(code: "invalid_url", message: "URL must be an HTTP(S) URL with a host and no embedded credentials.") }; return url }
     static func parseOffset(_ value: String) throws -> TimeInterval { guard let seconds = Double(value), seconds.isFinite else { throw ProcessorError(code: "invalid_alarm_offset", message: "Relative alarm offset must be seconds, usually negative.") }; return seconds }
     static func parseLocationAlarm(_ value: String) throws -> ReminderLocationAlarmDraft {
         let parts = value.split(separator: ",", maxSplits: 4).map(String.init)
@@ -250,17 +258,19 @@ struct TaskiCLI {
             if options.contains("--repeat-interval") || options.contains("--repeat-count") || options.contains("--repeat-until") { throw usage("--repeat is required with recurrence options") }; return nil
         }
         guard let frequency = ReminderRecurrenceFrequency(rawValue: raw.lowercased()) else { throw ProcessorError(code: "invalid_recurrence", message: "Repeat must be daily, weekly, monthly, or yearly.") }
-        let interval = try options.single("--repeat-interval").flatMap(Int.init) ?? 1; guard interval > 0 else { throw ProcessorError(code: "invalid_recurrence", message: "Repeat interval must be positive.") }
+        let interval: Int
+        if let rawInterval = try options.single("--repeat-interval") { guard let parsed = Int(rawInterval) else { throw ProcessorError(code: "invalid_recurrence", message: "Repeat interval must be an integer.") }; interval = parsed } else { interval = 1 }
+        guard interval > 0 else { throw ProcessorError(code: "invalid_recurrence", message: "Repeat interval must be positive.") }
         try options.requireExclusive("--repeat-count", "--repeat-until")
         let end: ReminderRecurrenceEnd
-        if let count = try options.single("--repeat-count").flatMap(Int.init) { guard count > 0 else { throw ProcessorError(code: "invalid_recurrence", message: "Repeat count must be positive.") }; end = .occurrences(count) }
+        if let rawCount = try options.single("--repeat-count") { guard let count = Int(rawCount), count > 0 else { throw ProcessorError(code: "invalid_recurrence", message: "Repeat count must be a positive integer.") }; end = .occurrences(count) }
         else if let until = try options.single("--repeat-until") { end = .date(try parseDate(until)) }
         else { end = .never }
         return ReminderRecurrence(frequency: frequency, interval: interval, end: end)
     }
     static func printReminder(_ reminder: ReminderSnapshot) {
         let formatter = ISO8601DateFormatter()
-        print("reminder_id: \(reminder.localIdentifier)\nexternal_id: \(reminder.externalIdentifier ?? "none")\nstate: \(reminder.isCompleted ? "completed" : "incomplete")\ntitle: \(safeText(reminder.title))\nnotes: \(reminder.notes.map(safeText) ?? "none")\nstart: \(reminder.startDate.map(formatter.string) ?? "none")\nstart_all_day: \(reminder.startDateIsAllDay)\ndue: \(reminder.dueDate.map(formatter.string) ?? "none")\ndue_all_day: \(reminder.dueDateIsAllDay)\ntimezone: \(reminder.timeZoneIdentifier ?? "floating/system")\nlocation: \(reminder.location.map(safeText) ?? "none")\nurl: \(reminder.url?.absoluteString ?? "none")\npriority: \(String(describing: reminder.priority))\ncreated: \(reminder.creationDate.map(formatter.string) ?? "unknown")\nmodified: \(reminder.lastModifiedDate.map(formatter.string) ?? "unknown")\ncompleted_at: \(reminder.completionDate.map(formatter.string) ?? "none")")
+        print("reminder_id: \(reminder.localIdentifier)\nexternal_id: \(reminder.externalIdentifier ?? "none")\nstate: \(reminder.isCompleted ? "completed" : "incomplete")\ntitle: \(safeText(reminder.title))\nnotes: \(reminder.notes.map(safeText) ?? "none")\nstart: \(reminder.startDateIsAllDay ? "none" : reminder.startDate.map(formatter.string) ?? "none")\nstart_date: \(reminder.startDateIsAllDay ? reminder.startDate.map(calendarDateText) ?? "none" : "none")\ndue: \(reminder.dueDateIsAllDay ? "none" : reminder.dueDate.map(formatter.string) ?? "none")\ndue_date: \(reminder.dueDateIsAllDay ? reminder.dueDate.map(calendarDateText) ?? "none" : "none")\ntimezone: \(reminder.timeZoneIdentifier ?? "floating/system")\nlocation: \(reminder.location.map(safeText) ?? "none")\nurl: \(reminder.url?.absoluteString ?? "none")\npriority: \(String(describing: reminder.priority))\ncreated: \(reminder.creationDate.map(formatter.string) ?? "unknown")\nmodified: \(reminder.lastModifiedDate.map(formatter.string) ?? "unknown")\ncompleted_at: \(reminder.completionDate.map(formatter.string) ?? "none")")
         if reminder.alarms.isEmpty { print("alarms: none") }
         else {
             for alarm in reminder.alarms {
@@ -275,8 +285,12 @@ struct TaskiCLI {
             }
         }
         if reminder.recurrence.isEmpty { print("recurrence: none") }
-        for rule in reminder.recurrence { print("recurrence: \(rule.frequency.rawValue) interval=\(rule.interval) end=\(recurrenceEndText(rule.end, formatter: formatter))") }
+        for rule in reminder.recurrence {
+            let kind = rule.isSimple ? rule.frequency.rawValue : "advanced_unsupported frequency=\(rule.frequency.rawValue)"
+            print("recurrence: \(kind) interval=\(rule.interval) end=\(recurrenceEndText(rule.end, formatter: formatter))")
+        }
     }
+    static func calendarDateText(_ date: Date) -> String { let formatter = DateFormatter(); formatter.calendar = Calendar(identifier: .gregorian); formatter.timeZone = TimeZone(secondsFromGMT: 0); formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd"; return formatter.string(from: date) }
     static func recurrenceEndText(_ end: ReminderRecurrenceEnd, formatter: ISO8601DateFormatter) -> String { switch end { case .never: return "never"; case .date(let date): return formatter.string(from: date); case .occurrences(let count): return "count:\(count)" } }
     static func usage(_ detail: String) -> ProcessorError { ProcessorError(code: "invalid_arguments", message: "\(detail). Use `taski reminder help`.") }
     static func safeText(_ value: String) -> String {

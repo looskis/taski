@@ -69,9 +69,10 @@ public final class EventKitReminderStore: ReminderStore, ReminderCRUDStore, @unc
         let reminder = try configuredReminder(localIdentifier: localIdentifier, calendarIdentifier: calendarIdentifier)
         if let title = patch.title { reminder.title = title }
         switch patch.notes { case .unchanged: break; case .set(let notes): reminder.notes = notes; case .clear: reminder.notes = nil }
-        switch patch.timeZoneIdentifier { case .unchanged: break; case .set(let identifier): reminder.timeZone = TimeZone(identifier: identifier); case .clear: reminder.timeZone = nil }
-        if case .unchanged = patch.dueDate, var components = reminder.dueDateComponents, !isAllDay(components) { components.timeZone = reminder.timeZone; reminder.dueDateComponents = components }
-        if case .unchanged = patch.startDate, var components = reminder.startDateComponents, !isAllDay(components) { components.timeZone = reminder.timeZone; reminder.startDateComponents = components }
+        let timeZoneChanged: Bool
+        switch patch.timeZoneIdentifier { case .unchanged: timeZoneChanged = false; case .set(let identifier): reminder.timeZone = TimeZone(identifier: identifier); timeZoneChanged = true; case .clear: reminder.timeZone = nil; timeZoneChanged = true }
+        if timeZoneChanged, case .unchanged = patch.dueDate, var components = reminder.dueDateComponents, !isAllDay(components) { components.timeZone = reminder.timeZone; reminder.dueDateComponents = components }
+        if timeZoneChanged, case .unchanged = patch.startDate, var components = reminder.startDateComponents, !isAllDay(components) { components.timeZone = reminder.timeZone; reminder.startDateComponents = components }
         switch patch.dueDate { case .unchanged: break; case .set(let date): reminder.dueDateComponents = dateComponents(date, allDay: patch.dueDateIsAllDay ?? false, timeZone: reminder.timeZone); case .clear: reminder.dueDateComponents = nil }
         switch patch.startDate { case .unchanged: break; case .set(let date): reminder.startDateComponents = dateComponents(date, allDay: patch.startDateIsAllDay ?? false, timeZone: reminder.timeZone); case .clear: reminder.startDateComponents = nil }
         switch patch.location { case .unchanged: break; case .set(let value): reminder.location = value; case .clear: reminder.location = nil }
@@ -145,8 +146,8 @@ public final class EventKitReminderStore: ReminderStore, ReminderCRUDStore, @unc
     }
 
     private func snapshot(_ reminder: EKReminder) -> ReminderSnapshot {
-        let dueDate = reminder.dueDateComponents.flatMap { Calendar.current.date(from: $0) }
-        let startDate = reminder.startDateComponents.flatMap { Calendar.current.date(from: $0) }
+        let dueDate = reminder.dueDateComponents.flatMap(date(from:))
+        let startDate = reminder.startDateComponents.flatMap(date(from:))
         let alarms: [ReminderAlarm] = (reminder.alarms ?? []).map { alarm in
             if let date = alarm.absoluteDate { return .absolute(date) }
             if let location = alarm.structuredLocation {
@@ -156,16 +157,27 @@ public final class EventKitReminderStore: ReminderStore, ReminderCRUDStore, @unc
             }
             return .relative(seconds: alarm.relativeOffset)
         }
-        return ReminderSnapshot(localIdentifier: reminder.calendarItemIdentifier, externalIdentifier: reminder.calendarItemExternalIdentifier, calendarIdentifier: reminder.calendar.calendarIdentifier, sourceIdentifier: reminder.calendar.source.sourceIdentifier, title: reminder.title, notes: reminder.notes, isCompleted: reminder.isCompleted, dueDate: dueDate, dueDateIsAllDay: reminder.dueDateComponents.map(isAllDay) ?? false, startDate: startDate, startDateIsAllDay: reminder.startDateComponents.map(isAllDay) ?? false, priority: ReminderPriority(rawValue: reminder.priority) ?? .none, alarms: alarms, location: reminder.location, url: reminder.url, timeZoneIdentifier: reminder.timeZone?.identifier ?? reminder.dueDateComponents?.timeZone?.identifier, recurrence: (reminder.recurrenceRules ?? []).map(recurrenceSnapshot), creationDate: reminder.creationDate, lastModifiedDate: reminder.lastModifiedDate, completionDate: reminder.completionDate)
+        return ReminderSnapshot(localIdentifier: reminder.calendarItemIdentifier, externalIdentifier: reminder.calendarItemExternalIdentifier, calendarIdentifier: reminder.calendar.calendarIdentifier, sourceIdentifier: reminder.calendar.source.sourceIdentifier, title: reminder.title, notes: reminder.notes, isCompleted: reminder.isCompleted, dueDate: dueDate, dueDateIsAllDay: reminder.dueDateComponents.map(isAllDay) ?? false, startDate: startDate, startDateIsAllDay: reminder.startDateComponents.map(isAllDay) ?? false, priority: ReminderPriority(rawValue: reminder.priority) ?? .none, alarms: alarms, location: reminder.location, url: reminder.url, timeZoneIdentifier: reminder.timeZone?.identifier ?? reminder.dueDateComponents?.timeZone?.identifier ?? reminder.startDateComponents?.timeZone?.identifier, recurrence: (reminder.recurrenceRules ?? []).map(recurrenceSnapshot), creationDate: reminder.creationDate, lastModifiedDate: reminder.lastModifiedDate, completionDate: reminder.completionDate)
     }
 
     private func dateComponents(_ date: Date, allDay: Bool, timeZone: TimeZone?) -> DateComponents {
-        let zone = timeZone ?? TimeZone.current
-        var components = Calendar.current.dateComponents(in: zone, from: date)
+        let zone = allDay ? TimeZone(secondsFromGMT: 0)! : timeZone ?? TimeZone.current
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        var components = calendar.dateComponents(in: zone, from: date)
         if allDay { components.hour = nil; components.minute = nil; components.second = nil; components.nanosecond = nil }
-        components.calendar = Calendar.current
+        components.calendar = Calendar(identifier: .gregorian)
         components.timeZone = allDay ? nil : zone
         return components
+    }
+
+    private func date(from components: DateComponents) -> Date? {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = isAllDay(components) ? TimeZone(secondsFromGMT: 0)! : components.timeZone ?? TimeZone.current
+        var value = components
+        value.calendar = calendar
+        value.timeZone = isAllDay(components) ? calendar.timeZone : components.timeZone ?? calendar.timeZone
+        return calendar.date(from: value)
     }
 
     private func isAllDay(_ components: DateComponents) -> Bool { components.hour == nil && components.minute == nil && components.second == nil }
@@ -195,7 +207,13 @@ public final class EventKitReminderStore: ReminderStore, ReminderCRUDStore, @unc
         if let recurrenceEnd = rule.recurrenceEnd, let date = recurrenceEnd.endDate { end = .date(date) }
         else if let recurrenceEnd = rule.recurrenceEnd, recurrenceEnd.occurrenceCount > 0 { end = .occurrences(recurrenceEnd.occurrenceCount) }
         else { end = .never }
-        return ReminderRecurrence(frequency: frequency, interval: rule.interval, end: end)
+        let isSimple = (rule.daysOfTheWeek?.isEmpty ?? true)
+            && (rule.daysOfTheMonth?.isEmpty ?? true)
+            && (rule.daysOfTheYear?.isEmpty ?? true)
+            && (rule.weeksOfTheYear?.isEmpty ?? true)
+            && (rule.monthsOfTheYear?.isEmpty ?? true)
+            && (rule.setPositions?.isEmpty ?? true)
+        return ReminderRecurrence(frequency: frequency, interval: rule.interval, end: end, isSimple: isSimple)
     }
 
     private static func sourceType(_ type: EKSourceType) -> String {

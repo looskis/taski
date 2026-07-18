@@ -113,6 +113,18 @@ struct BehavioralTests {
         let alarm = Date(timeIntervalSince1970: 1_799_996_400)
 
         let recurrence = ReminderRecurrence(frequency: .weekly, interval: 2, end: .occurrences(4))
+        do {
+            _ = try await manager.create(ReminderDraft(title: "invalid relative alarm", relativeAlarms: [-900]))
+            throw TestFailure.failed("relative alarms without a start date must be rejected")
+        } catch let error as ProcessorError {
+            try expect(error.code == "relative_alarm_requires_start", "relative alarms without a start date must be rejected")
+        }
+        do {
+            _ = try await manager.create(ReminderDraft(title: "invalid recurrence", recurrence: [recurrence]))
+            throw TestFailure.failed("recurrence without a date anchor must be rejected")
+        } catch let error as ProcessorError {
+            try expect(error.code == "recurrence_requires_date", "recurrence without a date anchor must be rejected")
+        }
         let created = try await manager.create(ReminderDraft(title: "report system", notes: "weekly", dueDate: due, startDate: alarm, priority: .high, alarms: [alarm], relativeAlarms: [-900], locationAlarms: [.init(name: "Office", latitude: 34.05, longitude: -118.24, radiusMeters: 100, proximity: "enter")], url: URL(string: "https://example.com"), timeZoneIdentifier: "America/Los_Angeles", recurrence: [recurrence]))
         try expect(created.title == "report system" && created.priority == .high && created.startDate == alarm && created.url?.host == "example.com" && created.recurrence == [recurrence] && created.alarms.count == 3, "create should persist public EventKit reminder fields")
         let initialList = try await manager.list(includeCompleted: false)
