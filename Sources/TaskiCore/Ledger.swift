@@ -102,7 +102,21 @@ public final class Ledger: @unchecked Sendable {
         } }
     }
 
+    public func supersede(taskID: String, detail: String) throws {
+        try locked { try transaction {
+            guard let current = try get(taskID), current.state == .succeeded else { throw ProcessorError(code: "not_supersedable", message: "Only a succeeded task can start a new reminder generation.") }
+            try run("UPDATE tasks SET state=?,updated_at=? WHERE task_id=?", [TaskState.superseded.rawValue, Date().timeIntervalSince1970, taskID])
+            try auditLocked(taskID, current.state, .superseded, detail)
+        } }
+    }
+
     public func task(id: String) throws -> TaskRecord? { try locked { try get(id) } }
+    public func task(matching reminder: ReminderSnapshot) throws -> TaskRecord? {
+        try locked {
+            if let external = reminder.externalIdentifier, let task = try queryTasks("SELECT * FROM tasks WHERE external_id=? AND calendar_id=? AND source_id=? AND state!=? ORDER BY created_at DESC LIMIT 1", [external, reminder.calendarIdentifier, reminder.sourceIdentifier, TaskState.superseded.rawValue]).first { return task }
+            return try queryTasks("SELECT * FROM tasks WHERE local_id=? AND calendar_id=? AND source_id=? AND state!=? ORDER BY created_at DESC LIMIT 1", [reminder.localIdentifier, reminder.calendarIdentifier, reminder.sourceIdentifier, TaskState.superseded.rawValue]).first
+        }
+    }
     public func tasks() throws -> [TaskRecord] { try locked { try queryTasks("SELECT * FROM tasks ORDER BY created_at DESC", []) } }
     public func audit(taskID: String) throws -> [AuditEntry] { try locked { try queryAudit(taskID) } }
     public func recordMetric(_ key: String, at date: Date = Date()) throws { try locked { try run("INSERT INTO metrics(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [key, date.timeIntervalSince1970]) } }
@@ -116,17 +130,17 @@ public final class Ledger: @unchecked Sendable {
     }
 
     private func find(_ reminder: ReminderSnapshot, currentLocalIdentifiers: Set<String>?) throws -> TaskRecord? {
-        if let external = reminder.externalIdentifier, let match = try queryTasks("SELECT * FROM tasks WHERE external_id=? AND calendar_id=? AND source_id=? LIMIT 1", [external, reminder.calendarIdentifier, reminder.sourceIdentifier]).first { return match }
-        if let match = try queryTasks("SELECT * FROM tasks WHERE local_id=? AND calendar_id=? LIMIT 1", [reminder.localIdentifier, reminder.calendarIdentifier]).first { return match }
+        if let external = reminder.externalIdentifier, let match = try queryTasks("SELECT * FROM tasks WHERE external_id=? AND calendar_id=? AND source_id=? AND state!=? ORDER BY created_at DESC LIMIT 1", [external, reminder.calendarIdentifier, reminder.sourceIdentifier, TaskState.superseded.rawValue]).first { return match }
+        if let match = try queryTasks("SELECT * FROM tasks WHERE local_id=? AND calendar_id=? AND state!=? ORDER BY created_at DESC LIMIT 1", [reminder.localIdentifier, reminder.calendarIdentifier, TaskState.superseded.rawValue]).first { return match }
         guard let currentLocalIdentifiers else { return nil }
-        let candidates = try queryTasks("SELECT * FROM tasks WHERE fingerprint=? AND calendar_id=? AND source_id=?", [reminder.fingerprint, reminder.calendarIdentifier, reminder.sourceIdentifier])
+        let candidates = try queryTasks("SELECT * FROM tasks WHERE fingerprint=? AND calendar_id=? AND source_id=? AND state!=?", [reminder.fingerprint, reminder.calendarIdentifier, reminder.sourceIdentifier, TaskState.superseded.rawValue])
         let recoverable = candidates.filter { !currentLocalIdentifiers.contains($0.localIdentifier) }
         return recoverable.count == 1 ? recoverable[0] : nil
     }
 
     private func hasAmbiguousRecovery(_ reminder: ReminderSnapshot, currentLocalIdentifiers: Set<String>?) throws -> Bool {
         guard let currentLocalIdentifiers else { return false }
-        let candidates = try queryTasks("SELECT * FROM tasks WHERE fingerprint=? AND calendar_id=? AND source_id=?", [reminder.fingerprint, reminder.calendarIdentifier, reminder.sourceIdentifier])
+        let candidates = try queryTasks("SELECT * FROM tasks WHERE fingerprint=? AND calendar_id=? AND source_id=? AND state!=?", [reminder.fingerprint, reminder.calendarIdentifier, reminder.sourceIdentifier, TaskState.superseded.rawValue])
         return candidates.filter { !currentLocalIdentifiers.contains($0.localIdentifier) }.count > 1
     }
 

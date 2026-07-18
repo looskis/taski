@@ -114,7 +114,7 @@ public actor Reconciler {
     }
 }
 
-private final class ProcessLock: @unchecked Sendable {
+final class ProcessLock: @unchecked Sendable {
     private var descriptor: Int32 = -1
     init(path: String?) throws {
         guard let path else { return }

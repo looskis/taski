@@ -45,7 +45,7 @@ taski cancel TASK_ID           Cancel a pending/non-running task
 
 ### Reminder management
 
-All reminder CRUD commands are restricted to the configured inbox. They accept a current EventKit reminder ID; `show`, `edit`, `complete`, `reopen`, and `delete` also accept a Taski task ID and use the ledger's external-identifier/fingerprint evidence to recover a changed local EventKit ID.
+All reminder CRUD commands are restricted to the configured inbox. They accept a current EventKit reminder ID; `show`, `edit`, `complete`, `reopen`, and `delete` also accept a Taski task ID. Recovery prefers the external identifier; when none exists, the stored local identifier is accepted only while its content fingerprint still agrees. Mutating commands never use fingerprint-only guesses.
 
 ```sh
 taski reminder create --title "report system" \
@@ -69,7 +69,7 @@ taski reminder delete REMINDER_OR_TASK_ID       # interactive confirmation
 taski reminder delete REMINDER_OR_TASK_ID --yes # non-interactive
 ```
 
-Dates and alarms use RFC 3339 timestamps with an explicit offset. Priorities are `none`, `low`, `medium`, or `high`. The CLI currently exposes absolute date/time alarms; EventKit location and relative alarms remain untouched unless `--clear-alarms` is supplied. Editing a reminder—not its ledger row—is the supported way to change task content, and the daemon reparses the updated reminder through its normal safety policy.
+Dates and alarms use RFC 3339 timestamps with an explicit offset. Priorities are `none`, `low`, `medium`, or `high`. The CLI currently creates absolute date/time alarms; reads identify absolute, relative, and location alarms, and existing relative/location alarms remain untouched unless `--clear-alarms` is supplied. Editing an incomplete reminder—not its ledger row—is the supported way to change task content, and the daemon reparses it through its normal safety policy. Reopening a successfully processed reminder explicitly retires its old ledger generation so the reopened content can be classified as a new task.
 
 The daemon reconciles at startup, after debounced `EKEventStoreChanged` notifications, and every 60 seconds. Every notification causes a full refetch; EventKit objects are not cached. Reconciliation is serialized, processors time out after 120 seconds, and no failure is automatically retried forever. A task left `running` by a crash is marked failed for operator inspection rather than assumed safe to repeat.
 

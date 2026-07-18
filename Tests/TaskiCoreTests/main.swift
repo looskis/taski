@@ -127,6 +127,19 @@ struct BehavioralTests {
         _ = try await manager.setCompleted(identifier: created.localIdentifier, completed: false)
 
         let ledgerTask = try ledger.discover(created)
+        try ledger.transition(taskID: ledgerTask.taskID, to: .queued, summary: nil, error: nil)
+        try ledger.transition(taskID: ledgerTask.taskID, to: .running, summary: nil, error: nil)
+        try ledger.transition(taskID: ledgerTask.taskID, to: .succeeded, summary: "done", error: nil)
+        _ = try await manager.setCompleted(identifier: ledgerTask.taskID, completed: true)
+        let reopened = try await manager.setCompleted(identifier: ledgerTask.taskID, completed: false)
+        try expect(try ledger.task(id: ledgerTask.taskID)?.state == .superseded, "reopening a succeeded task should retire its old ledger generation")
+        let newGeneration = try ledger.discover(reopened, currentLocalIdentifiers: [reopened.localIdentifier])
+        try expect(newGeneration.taskID != ledgerTask.taskID, "a reopened reminder should reconcile as a new task generation")
+        try ledger.transition(taskID: newGeneration.taskID, to: .queued, summary: nil, error: nil)
+        try ledger.transition(taskID: newGeneration.taskID, to: .running, summary: nil, error: nil)
+        try ledger.transition(taskID: newGeneration.taskID, to: .succeeded, summary: "done again", error: nil)
+        _ = try await manager.edit(identifier: newGeneration.taskID, patch: ReminderPatch(title: "report system edited"))
+        try expect(try ledger.task(id: newGeneration.taskID)?.state == .superseded, "editing a succeeded but incomplete reminder should start a new generation")
         await store.changeLocalIdentifier(from: created.localIdentifier, to: "resynced-id")
         let recoveredReminder = try await manager.show(identifier: ledgerTask.taskID)
         try expect(recoveredReminder.localIdentifier == "resynced-id", "task IDs should recover reminders after a local identifier change")
@@ -156,16 +169,18 @@ actor FakeCRUDReminderStore: ReminderCRUDStore {
     func authorizationStatus() async -> ReminderAuthorization { .fullAccess }
     func fetchAll(calendarIdentifier: String) async throws -> [ReminderSnapshot] { reminders.filter { $0.calendarIdentifier == calendarIdentifier } }
     func create(calendarIdentifier: String, sourceIdentifier: String, draft: ReminderDraft) async throws -> ReminderSnapshot {
-        let reminder = ReminderSnapshot(localIdentifier: UUID().uuidString, externalIdentifier: UUID().uuidString, calendarIdentifier: calendarIdentifier, sourceIdentifier: sourceIdentifier, title: draft.title, notes: draft.notes, isCompleted: false, dueDate: draft.dueDate, priority: draft.priority, alarms: draft.alarms)
+        let reminder = ReminderSnapshot(localIdentifier: UUID().uuidString, externalIdentifier: UUID().uuidString, calendarIdentifier: calendarIdentifier, sourceIdentifier: sourceIdentifier, title: draft.title, notes: draft.notes, isCompleted: false, dueDate: draft.dueDate, priority: draft.priority, alarms: draft.alarms.map(ReminderAlarm.absolute))
         reminders.append(reminder); return reminder
     }
     func update(localIdentifier: String, calendarIdentifier: String, patch: ReminderPatch) async throws -> ReminderSnapshot {
         guard let index = reminders.firstIndex(where: { $0.localIdentifier == localIdentifier && $0.calendarIdentifier == calendarIdentifier }) else { throw ProcessorError(code: "reminder_missing", message: "missing") }
-        reminders[index] = reminders[index].applying(patch); return reminders[index]
+        let old = reminders[index]
+        reminders[index] = ReminderSnapshot(localIdentifier: old.localIdentifier, externalIdentifier: old.externalIdentifier, calendarIdentifier: old.calendarIdentifier, sourceIdentifier: old.sourceIdentifier, title: patch.title ?? old.title, notes: patch.notes.applying(to: old.notes), isCompleted: old.isCompleted, dueDate: patch.dueDate.applying(to: old.dueDate), priority: patch.priority ?? old.priority, alarms: (patch.clearAlarms ? [] : old.alarms) + patch.addAlarms.map(ReminderAlarm.absolute)); return reminders[index]
     }
     func setCompleted(localIdentifier: String, calendarIdentifier: String, completed: Bool) async throws -> ReminderSnapshot {
         guard let index = reminders.firstIndex(where: { $0.localIdentifier == localIdentifier && $0.calendarIdentifier == calendarIdentifier }) else { throw ProcessorError(code: "reminder_missing", message: "missing") }
-        reminders[index] = reminders[index].withCompletion(completed); return reminders[index]
+        let old = reminders[index]
+        reminders[index] = ReminderSnapshot(localIdentifier: old.localIdentifier, externalIdentifier: old.externalIdentifier, calendarIdentifier: old.calendarIdentifier, sourceIdentifier: old.sourceIdentifier, title: old.title, notes: old.notes, isCompleted: completed, dueDate: old.dueDate, priority: old.priority, alarms: old.alarms); return reminders[index]
     }
     func delete(localIdentifier: String, calendarIdentifier: String) async throws {
         guard let index = reminders.firstIndex(where: { $0.localIdentifier == localIdentifier && $0.calendarIdentifier == calendarIdentifier }) else { throw ProcessorError(code: "reminder_missing", message: "missing") }
@@ -173,6 +188,7 @@ actor FakeCRUDReminderStore: ReminderCRUDStore {
     }
     func changeLocalIdentifier(from: String, to: String) {
         guard let index = reminders.firstIndex(where: { $0.localIdentifier == from }) else { return }
-        reminders[index] = reminders[index].withLocalIdentifier(to)
+        let old = reminders[index]
+        reminders[index] = ReminderSnapshot(localIdentifier: to, externalIdentifier: old.externalIdentifier, calendarIdentifier: old.calendarIdentifier, sourceIdentifier: old.sourceIdentifier, title: old.title, notes: old.notes, isCompleted: old.isCompleted, dueDate: old.dueDate, priority: old.priority, alarms: old.alarms)
     }
 }

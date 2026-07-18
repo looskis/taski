@@ -92,7 +92,7 @@ struct TaskiCLI {
         let config = try paths.load()
         let store = EventKitReminderStore()
         let ledger = try Ledger(path: paths.database.path)
-        let manager = ReminderManager(store: store, ledger: ledger, calendarIdentifier: config.reminders.calendarIdentifier, sourceIdentifier: config.reminders.sourceIdentifier)
+        let manager = ReminderManager(store: store, ledger: ledger, calendarIdentifier: config.reminders.calendarIdentifier, sourceIdentifier: config.reminders.sourceIdentifier, lockPath: paths.root.appendingPathComponent("reconcile.lock").path)
         let remainder = Array(arguments.dropFirst())
         switch command {
         case "create":
@@ -104,7 +104,7 @@ struct TaskiCLI {
             let options = try CLIOptions(remainder, values: [], flags: ["--all"])
             let reminders = try await manager.list(includeCompleted: options.has("--all"))
             if reminders.isEmpty { print("No reminders in the configured inbox.") }
-            for reminder in reminders { print("\(reminder.localIdentifier)  \(reminder.isCompleted ? "completed" : "incomplete")  \(reminder.title)") }
+            for reminder in reminders { print("\(reminder.localIdentifier)  \(reminder.isCompleted ? "completed" : "incomplete")  \(safeText(reminder.title))") }
         case "show":
             guard remainder.count == 1 else { throw usage("show requires one reminder or task ID") }
             printReminder(try await manager.show(identifier: remainder[0]))
@@ -124,12 +124,13 @@ struct TaskiCLI {
         case "delete":
             guard let identifier = remainder.first, !identifier.hasPrefix("--") else { throw usage("delete requires a reminder or task ID") }
             let options = try CLIOptions(Array(remainder.dropFirst()), values: [], flags: ["--yes"])
+            let target = try await manager.show(identifier: identifier)
             if !options.has("--yes") {
-                print("Permanently delete this reminder from the configured inbox? [y/N]: ", terminator: "")
+                print("Permanently delete `\(safeText(target.title))` (\(target.localIdentifier))? [y/N]: ", terminator: "")
                 guard ["y", "yes"].contains((readLine() ?? "").lowercased()) else { throw ProcessorError(code: "delete_cancelled", message: "Reminder was not deleted.") }
             }
-            try await manager.delete(identifier: identifier)
-            print("Deleted reminder \(identifier).")
+            try await manager.delete(identifier: target.localIdentifier, expectedFingerprint: target.fingerprint)
+            print("Deleted reminder \(target.localIdentifier).")
         default: preconditionFailure("validated reminder command was not handled")
         }
     }
@@ -218,10 +219,30 @@ struct TaskiCLI {
     }
     static func printReminder(_ reminder: ReminderSnapshot) {
         let formatter = ISO8601DateFormatter()
-        print("id: \(reminder.localIdentifier)\nexternal_id: \(reminder.externalIdentifier ?? "none")\nstate: \(reminder.isCompleted ? "completed" : "incomplete")\ntitle: \(reminder.title)\nnotes: \(reminder.notes ?? "none")\ndue: \(reminder.dueDate.map(formatter.string) ?? "none")\npriority: \(String(describing: reminder.priority))")
-        if reminder.alarms.isEmpty { print("alarms: none") } else { for alarm in reminder.alarms { print("alarm: \(formatter.string(from: alarm))") } }
+        print("id: \(reminder.localIdentifier)\nexternal_id: \(reminder.externalIdentifier ?? "none")\nstate: \(reminder.isCompleted ? "completed" : "incomplete")\ntitle: \(safeText(reminder.title))\nnotes: \(reminder.notes.map(safeText) ?? "none")\ndue: \(reminder.dueDate.map(formatter.string) ?? "none")\npriority: \(String(describing: reminder.priority))")
+        if reminder.alarms.isEmpty { print("alarms: none") }
+        else {
+            for alarm in reminder.alarms {
+                switch alarm {
+                case .absolute(let date): print("alarm_absolute: \(formatter.string(from: date))")
+                case .relative(let seconds): print("alarm_relative_seconds: \(seconds)")
+                case .location(let name, let latitude, let longitude, let radius, let proximity):
+                    let latitudeText = latitude.map { String($0) } ?? "unknown"
+                    let longitudeText = longitude.map { String($0) } ?? "unknown"
+                    print("alarm_location: name=\(safeText(name ?? "none")) latitude=\(latitudeText) longitude=\(longitudeText) radius_meters=\(radius) proximity=\(proximity)")
+                }
+            }
+        }
     }
     static func usage(_ detail: String) -> ProcessorError { ProcessorError(code: "invalid_arguments", message: "\(detail). Use `taski reminder help`.") }
+    static func safeText(_ value: String) -> String {
+        value.unicodeScalars.map { scalar in
+            if scalar == "\n" { return "\\n" }
+            if scalar == "\t" { return "\\t" }
+            if CharacterSet.controlCharacters.contains(scalar) { return "\\u{\(String(scalar.value, radix: 16))}" }
+            return String(scalar)
+        }.joined()
+    }
     static func log(event: String, fields: [String: String]) { var value = fields; value["event"] = event; value["time"] = ISO8601DateFormatter().string(from: Date()); if let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), let line = String(data: data, encoding: .utf8) { print(line) } }
     static func help() { print("""
     taski — safe Reminders task daemon

@@ -130,7 +130,15 @@ public final class EventKitReminderStore: ReminderStore, ReminderCRUDStore, @unc
 
     private func snapshot(_ reminder: EKReminder) -> ReminderSnapshot {
         let dueDate = reminder.dueDateComponents.flatMap { Calendar.current.date(from: $0) }
-        let alarms = (reminder.alarms ?? []).compactMap(\.absoluteDate)
+        let alarms: [ReminderAlarm] = (reminder.alarms ?? []).map { alarm in
+            if let date = alarm.absoluteDate { return .absolute(date) }
+            if let location = alarm.structuredLocation {
+                let proximity: String
+                switch alarm.proximity { case .enter: proximity = "enter"; case .leave: proximity = "leave"; case .none: proximity = "none"; @unknown default: proximity = "unknown" }
+                return .location(name: location.title, latitude: location.geoLocation?.coordinate.latitude, longitude: location.geoLocation?.coordinate.longitude, radiusMeters: location.radius, proximity: proximity)
+            }
+            return .relative(seconds: alarm.relativeOffset)
+        }
         return ReminderSnapshot(localIdentifier: reminder.calendarItemIdentifier, externalIdentifier: reminder.calendarItemExternalIdentifier, calendarIdentifier: reminder.calendar.calendarIdentifier, sourceIdentifier: reminder.calendar.source.sourceIdentifier, title: reminder.title, notes: reminder.notes, isCompleted: reminder.isCompleted, dueDate: dueDate, priority: ReminderPriority(rawValue: reminder.priority) ?? .none, alarms: alarms)
     }
 

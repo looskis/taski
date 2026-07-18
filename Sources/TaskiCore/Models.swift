@@ -1,7 +1,7 @@
 import Foundation
 
 public enum TaskState: String, Codable, CaseIterable, Sendable {
-    case discovered, rejected, awaitingApproval = "awaiting_approval", queued, running, succeeded, failed, cancelled
+    case discovered, rejected, awaitingApproval = "awaiting_approval", queued, running, succeeded, failed, cancelled, superseded
 }
 
 public struct ReminderSnapshot: Equatable, Sendable {
@@ -14,9 +14,9 @@ public struct ReminderSnapshot: Equatable, Sendable {
     public let isCompleted: Bool
     public let dueDate: Date?
     public let priority: ReminderPriority
-    public let alarms: [Date]
+    public let alarms: [ReminderAlarm]
 
-    public init(localIdentifier: String, externalIdentifier: String?, calendarIdentifier: String, sourceIdentifier: String, title: String, notes: String?, isCompleted: Bool = false, dueDate: Date? = nil, priority: ReminderPriority = .none, alarms: [Date] = []) {
+    public init(localIdentifier: String, externalIdentifier: String?, calendarIdentifier: String, sourceIdentifier: String, title: String, notes: String?, isCompleted: Bool = false, dueDate: Date? = nil, priority: ReminderPriority = .none, alarms: [ReminderAlarm] = []) {
         self.localIdentifier = localIdentifier
         self.externalIdentifier = externalIdentifier
         self.calendarIdentifier = calendarIdentifier
@@ -37,17 +37,6 @@ public struct ReminderSnapshot: Equatable, Sendable {
         return String(format: "%016llx", hash)
     }
 
-    public func applying(_ patch: ReminderPatch) -> ReminderSnapshot {
-        ReminderSnapshot(localIdentifier: localIdentifier, externalIdentifier: externalIdentifier, calendarIdentifier: calendarIdentifier, sourceIdentifier: sourceIdentifier, title: patch.title ?? title, notes: patch.notes.applying(to: notes), isCompleted: isCompleted, dueDate: patch.dueDate.applying(to: dueDate), priority: patch.priority ?? priority, alarms: patch.clearAlarms ? patch.addAlarms : alarms + patch.addAlarms)
-    }
-
-    public func withCompletion(_ completed: Bool) -> ReminderSnapshot {
-        ReminderSnapshot(localIdentifier: localIdentifier, externalIdentifier: externalIdentifier, calendarIdentifier: calendarIdentifier, sourceIdentifier: sourceIdentifier, title: title, notes: notes, isCompleted: completed, dueDate: dueDate, priority: priority, alarms: alarms)
-    }
-
-    public func withLocalIdentifier(_ identifier: String) -> ReminderSnapshot {
-        ReminderSnapshot(localIdentifier: identifier, externalIdentifier: externalIdentifier, calendarIdentifier: calendarIdentifier, sourceIdentifier: sourceIdentifier, title: title, notes: notes, isCompleted: isCompleted, dueDate: dueDate, priority: priority, alarms: alarms)
-    }
 }
 
 public enum ReminderPriority: Int, CaseIterable, Sendable {
@@ -55,6 +44,12 @@ public enum ReminderPriority: Int, CaseIterable, Sendable {
     case high = 1
     case medium = 5
     case low = 9
+}
+
+public enum ReminderAlarm: Equatable, Sendable {
+    case absolute(Date)
+    case relative(seconds: TimeInterval)
+    case location(name: String?, latitude: Double?, longitude: Double?, radiusMeters: Double, proximity: String)
 }
 
 public enum ReminderFieldUpdate<Value: Sendable>: Sendable {
