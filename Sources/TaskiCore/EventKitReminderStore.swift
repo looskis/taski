@@ -49,9 +49,13 @@ public final class EventKitReminderStore: ReminderStore, @unchecked Sendable {
         }
     }
 
-    public func complete(localIdentifier: String) async throws {
+    public func complete(localIdentifier: String, expectedFingerprint: String) async throws {
         guard let reminder = eventStore.calendarItem(withIdentifier: localIdentifier) as? EKReminder else {
             throw ProcessorError(code: "reminder_missing", message: "The source reminder no longer exists.")
+        }
+        let current = ReminderSnapshot(localIdentifier: reminder.calendarItemIdentifier, externalIdentifier: reminder.calendarItemExternalIdentifier, calendarIdentifier: reminder.calendar.calendarIdentifier, sourceIdentifier: reminder.calendar.source.sourceIdentifier, title: reminder.title, notes: reminder.notes)
+        guard current.fingerprint == expectedFingerprint else {
+            throw ProcessorError(code: "source_changed", message: "The reminder changed during execution and was not completed automatically.")
         }
         reminder.isCompleted = true
         reminder.completionDate = Date()

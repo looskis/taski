@@ -40,7 +40,7 @@ taski tasks                    List task IDs and states without reminder content
 taski inspect TASK_ID          Show task details and audit history locally
 taski approve TASK_ID          Durably approve, then reconcile
 taski retry TASK_ID            Explicitly retry a failed or rejected task
-taski cancel TASK_ID           Record local cancellation
+taski cancel TASK_ID           Cancel a pending/non-running task
 ```
 
 The daemon reconciles at startup, after debounced `EKEventStoreChanged` notifications, and every 60 seconds. Every notification causes a full refetch; EventKit objects are not cached. Reconciliation is serialized, processors time out after 120 seconds, and no failure is automatically retried forever. A task left `running` by a crash is marked failed for operator inspection rather than assumed safe to repeat.
@@ -50,6 +50,8 @@ The daemon reconciles at startup, after debounced `EKEventStoreChanged` notifica
 Reminder text is untrusted and is accepted only by the explicit grammar. Shell metacharacters and control characters are rejected, titles/bodies are length-limited, task lists and structured daemon logs omit reminder content, and consequential message drafts require a durable approval. Task identity matches external ID first, then local ID, then calendar/source plus normalized fingerprint. Editing an unapproved task resets its classification and invalidates the pending approval context.
 
 The SQLite result is committed before EventKit completion. If completion fails, the succeeded task remains in the ledger and a later reconciliation retries only completion. Processors receive the stable task UUID as their idempotency key.
+
+A timeout or crash leaves the external outcome unknown, so generic retry is refused for those states; inspect and resolve the target system before submitting a replacement task. `cancel` is intentionally limited to work that has not started (or has already stopped). It never pretends to terminate an active processor across processes.
 
 ## Troubleshooting
 

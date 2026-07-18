@@ -47,6 +47,10 @@ struct TaskiCLI {
             guard let input = readLine(), let index = Int(input), lists.indices.contains(index - 1) else { throw ProcessorError(code: "invalid_selection", message: "No valid list was selected.") }
             selected = lists[index - 1]
         }
+        print("Shared lists are unsupported. Confirm this is a private list you own [y/N]: ", terminator: "")
+        guard ["y", "yes"].contains((readLine() ?? "").lowercased()) else {
+            throw ProcessorError(code: "private_list_unconfirmed", message: "Select and confirm a private reminder list.")
+        }
         let config = TaskiConfiguration(
             reminders: .init(sourceIdentifier: selected.sourceIdentifier, sourceName: selected.sourceName, calendarIdentifier: selected.calendarIdentifier, calendarName: selected.calendarName, pollIntervalSeconds: 60, notificationDebounceMilliseconds: 750),
             execution: .init(maxConcurrency: 2, defaultTimeoutSeconds: 120, maxAutomaticAttempts: 3)
@@ -77,7 +81,7 @@ struct TaskiCLI {
         let store = EventKitReminderStore()
         let ledger = try Ledger(path: paths.database.path)
         let registry = ProcessorRegistry.standard(reportDirectory: paths.reports)
-        return (config, store, ledger, Reconciler(store: store, ledger: ledger, registry: registry, timeoutSeconds: Double(config.execution.defaultTimeoutSeconds)))
+        return (config, store, ledger, Reconciler(store: store, ledger: ledger, registry: registry, timeoutSeconds: Double(config.execution.defaultTimeoutSeconds), lockPath: paths.root.appendingPathComponent("reconcile.lock").path))
     }
 
     static func runOnce(paths: AppPaths) async throws {
@@ -86,7 +90,7 @@ struct TaskiCLI {
     }
 
     static func daemon(paths: AppPaths) async throws {
-        let (config, store, _, reconciler) = try makeRuntime(paths: paths)
+        let (config, store, ledger, reconciler) = try makeRuntime(paths: paths)
         let calendarID = config.reminders.calendarIdentifier
         try await reconciler.reconcile(calendarIdentifier: calendarID)
         log(event: "daemon_started", fields: ["calendar_id": calendarID])
@@ -99,11 +103,20 @@ struct TaskiCLI {
                 }
             }
             group.addTask {
+                var pending: Task<Void, Never>?
                 for await _ in store.changes() {
-                    try? await Task.sleep(nanoseconds: UInt64(config.reminders.notificationDebounceMilliseconds) * 1_000_000)
-                    do { try await reconciler.reconcile(calendarIdentifier: calendarID); log(event: "change_reconcile", fields: [:]) }
-                    catch { log(event: "reconcile_failed", fields: ["error": safeCode(error)]) }
+                    try? ledger.recordMetric("last_observed_store_change")
+                    pending?.cancel()
+                    pending = Task {
+                        do {
+                            try await Task.sleep(nanoseconds: UInt64(config.reminders.notificationDebounceMilliseconds) * 1_000_000)
+                            try await reconciler.reconcile(calendarIdentifier: calendarID)
+                            log(event: "change_reconcile", fields: [:])
+                        } catch is CancellationError {
+                        } catch { log(event: "reconcile_failed", fields: ["error": safeCode(error)]) }
+                    }
                 }
+                await pending?.value
             }
             await group.waitForAll()
         }
@@ -113,9 +126,14 @@ struct TaskiCLI {
         let config = try paths.load()
         let store = EventKitReminderStore()
         let tasks = try Ledger(path: paths.database.path).tasks()
+        let metrics = try Ledger(path: paths.database.path).metrics()
+        let date = ISO8601DateFormatter()
         print("health: \((await store.authorizationStatus()) == .fullAccess ? "ready" : "needs_attention")")
         print("authorization: \((await store.authorizationStatus()).rawValue)")
         print("inbox: \(config.reminders.sourceName) / \(config.reminders.calendarName)")
+        print("last_successful_fetch: \(metrics["last_successful_eventkit_fetch"].map(date.string) ?? "never")")
+        print("last_store_change: \(metrics["last_observed_store_change"].map(date.string) ?? "never")")
+        print("last_reminder_discovery: \(metrics["last_icloud_visible_reminder_discovery"].map(date.string) ?? "never")")
         for state in TaskState.allCases { print("\(state.rawValue): \(tasks.filter { $0.state == state }.count)") }
     }
 
@@ -133,7 +151,7 @@ struct TaskiCLI {
 
     static func approve(paths: AppPaths, id: String) async throws { try Ledger(path: paths.database.path).approve(taskID: id); try await runOnce(paths: paths) }
     static func retry(paths: AppPaths, id: String) async throws { try Ledger(path: paths.database.path).retry(taskID: id); try await runOnce(paths: paths) }
-    static func cancel(paths: AppPaths, id: String) throws { try Ledger(path: paths.database.path).transition(taskID: id, to: .cancelled, summary: "cancelled by operator", error: nil) }
+    static func cancel(paths: AppPaths, id: String) throws { try Ledger(path: paths.database.path).cancel(taskID: id) }
 
     static func requiredID(_ args: [String]) throws -> String { guard args.count == 2 else { throw ProcessorError(code: "missing_task_id", message: "This command requires one task ID.") }; return args[1] }
     static func option(_ name: String, in args: [String]) -> String? { guard let index = args.firstIndex(of: name), args.indices.contains(index + 1) else { return nil }; return args[index + 1] }

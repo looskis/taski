@@ -22,7 +22,8 @@ public struct ReminderSnapshot: Equatable, Sendable {
     }
 
     public var fingerprint: String {
-        let normalized = [title, notes ?? ""].map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.joined(separator: "\u{1f}")
+        let userNotes = (notes ?? "").split(separator: "\n").filter { !$0.hasPrefix("Taski: ") }.joined(separator: "\n")
+        let normalized = [title, userNotes].map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.joined(separator: "\u{1f}")
         var hash: UInt64 = 14_695_981_039_346_656_037
         for byte in normalized.utf8 { hash = (hash ^ UInt64(byte)) &* 1_099_511_628_211 }
         return String(format: "%016llx", hash)
@@ -60,7 +61,7 @@ public enum ReminderAuthorization: String, Sendable { case notDetermined, restri
 public protocol ReminderStore: Sendable {
     func authorizationStatus() async -> ReminderAuthorization
     func fetchIncomplete(calendarIdentifier: String) async throws -> [ReminderSnapshot]
-    func complete(localIdentifier: String) async throws
+    func complete(localIdentifier: String, expectedFingerprint: String) async throws
     func updateNote(localIdentifier: String, status: String) async throws
 }
 
