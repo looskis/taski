@@ -14,9 +14,29 @@ Anything else is rejected and remains incomplete. Shared reminder lists are not 
 
 - macOS 14 or later and Swift 5.10 or later.
 - An iCloud Reminders list such as `Agent Inbox`.
-- A stable Apple code-signing identity for normal installation. Ad-hoc signing is only for local build verification and should not be used across upgrades because privacy grants may not survive.
+- Homebrew for the easiest installation, or a stable Apple code-signing identity when building from source.
 
-## Build, configure, and run
+## Install with Homebrew
+
+```sh
+brew install looskis/taski/taski
+taski setup
+brew services start taski
+taski status
+```
+
+`taski setup` is the only interactive step: macOS asks for Reminders access, then Taski asks which private list it should manage. The formula installs the CLI and its headless app bundle together; `brew services` runs that same bundle through a stable `opt` path. There is no graphical application to open.
+
+To stop or remove it:
+
+```sh
+brew services stop taski
+brew uninstall taski
+```
+
+Homebrew builds are ad-hoc signed locally. If macOS forgets the Reminders privacy grant after an upgrade, enable Taski again under System Settings → Privacy & Security → Reminders. A consistent Developer ID signature remains the most stable choice for long-lived installations.
+
+## Build from source
 
 ```sh
 swift run taski-tests

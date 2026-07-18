@@ -59,6 +59,7 @@ struct TaskiCLI {
         try paths.save(config)
         _ = try Ledger(path: paths.database.path)
         print("Configured \(selected.sourceName) / \(selected.calendarName). Configuration: \(paths.configuration.path)")
+        print("Next: start the daemon using your installation method (Homebrew: `brew services start taski`).")
     }
 
     static func probe(request: Bool) async throws {
