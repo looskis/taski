@@ -11,14 +11,22 @@ public struct ReminderSnapshot: Equatable, Sendable {
     public let sourceIdentifier: String
     public let title: String
     public let notes: String?
+    public let isCompleted: Bool
+    public let dueDate: Date?
+    public let priority: ReminderPriority
+    public let alarms: [Date]
 
-    public init(localIdentifier: String, externalIdentifier: String?, calendarIdentifier: String, sourceIdentifier: String, title: String, notes: String?) {
+    public init(localIdentifier: String, externalIdentifier: String?, calendarIdentifier: String, sourceIdentifier: String, title: String, notes: String?, isCompleted: Bool = false, dueDate: Date? = nil, priority: ReminderPriority = .none, alarms: [Date] = []) {
         self.localIdentifier = localIdentifier
         self.externalIdentifier = externalIdentifier
         self.calendarIdentifier = calendarIdentifier
         self.sourceIdentifier = sourceIdentifier
         self.title = title
         self.notes = notes
+        self.isCompleted = isCompleted
+        self.dueDate = dueDate
+        self.priority = priority
+        self.alarms = alarms
     }
 
     public var fingerprint: String {
@@ -27,6 +35,58 @@ public struct ReminderSnapshot: Equatable, Sendable {
         var hash: UInt64 = 14_695_981_039_346_656_037
         for byte in normalized.utf8 { hash = (hash ^ UInt64(byte)) &* 1_099_511_628_211 }
         return String(format: "%016llx", hash)
+    }
+
+    public func applying(_ patch: ReminderPatch) -> ReminderSnapshot {
+        ReminderSnapshot(localIdentifier: localIdentifier, externalIdentifier: externalIdentifier, calendarIdentifier: calendarIdentifier, sourceIdentifier: sourceIdentifier, title: patch.title ?? title, notes: patch.notes.applying(to: notes), isCompleted: isCompleted, dueDate: patch.dueDate.applying(to: dueDate), priority: patch.priority ?? priority, alarms: patch.clearAlarms ? patch.addAlarms : alarms + patch.addAlarms)
+    }
+
+    public func withCompletion(_ completed: Bool) -> ReminderSnapshot {
+        ReminderSnapshot(localIdentifier: localIdentifier, externalIdentifier: externalIdentifier, calendarIdentifier: calendarIdentifier, sourceIdentifier: sourceIdentifier, title: title, notes: notes, isCompleted: completed, dueDate: dueDate, priority: priority, alarms: alarms)
+    }
+
+    public func withLocalIdentifier(_ identifier: String) -> ReminderSnapshot {
+        ReminderSnapshot(localIdentifier: identifier, externalIdentifier: externalIdentifier, calendarIdentifier: calendarIdentifier, sourceIdentifier: sourceIdentifier, title: title, notes: notes, isCompleted: isCompleted, dueDate: dueDate, priority: priority, alarms: alarms)
+    }
+}
+
+public enum ReminderPriority: Int, CaseIterable, Sendable {
+    case none = 0
+    case high = 1
+    case medium = 5
+    case low = 9
+}
+
+public enum ReminderFieldUpdate<Value: Sendable>: Sendable {
+    case unchanged
+    case set(Value)
+    case clear
+
+    public func applying(to current: Value?) -> Value? {
+        switch self { case .unchanged: return current; case .set(let value): return value; case .clear: return nil }
+    }
+}
+
+public struct ReminderDraft: Sendable {
+    public let title: String
+    public let notes: String?
+    public let dueDate: Date?
+    public let priority: ReminderPriority
+    public let alarms: [Date]
+    public init(title: String, notes: String? = nil, dueDate: Date? = nil, priority: ReminderPriority = .none, alarms: [Date] = []) {
+        self.title = title; self.notes = notes; self.dueDate = dueDate; self.priority = priority; self.alarms = alarms
+    }
+}
+
+public struct ReminderPatch: Sendable {
+    public let title: String?
+    public let notes: ReminderFieldUpdate<String>
+    public let dueDate: ReminderFieldUpdate<Date>
+    public let priority: ReminderPriority?
+    public let addAlarms: [Date]
+    public let clearAlarms: Bool
+    public init(title: String? = nil, notes: ReminderFieldUpdate<String> = .unchanged, dueDate: ReminderFieldUpdate<Date> = .unchanged, priority: ReminderPriority? = nil, addAlarms: [Date] = [], clearAlarms: Bool = false) {
+        self.title = title; self.notes = notes; self.dueDate = dueDate; self.priority = priority; self.addAlarms = addAlarms; self.clearAlarms = clearAlarms
     }
 }
 
@@ -63,6 +123,15 @@ public protocol ReminderStore: Sendable {
     func fetchIncomplete(calendarIdentifier: String) async throws -> [ReminderSnapshot]
     func complete(localIdentifier: String, expectedFingerprint: String) async throws
     func updateNote(localIdentifier: String, status: String) async throws
+}
+
+public protocol ReminderCRUDStore: Sendable {
+    func authorizationStatus() async -> ReminderAuthorization
+    func fetchAll(calendarIdentifier: String) async throws -> [ReminderSnapshot]
+    func create(calendarIdentifier: String, sourceIdentifier: String, draft: ReminderDraft) async throws -> ReminderSnapshot
+    func update(localIdentifier: String, calendarIdentifier: String, patch: ReminderPatch) async throws -> ReminderSnapshot
+    func setCompleted(localIdentifier: String, calendarIdentifier: String, completed: Bool) async throws -> ReminderSnapshot
+    func delete(localIdentifier: String, calendarIdentifier: String) async throws
 }
 
 public struct TaskResult: Sendable {

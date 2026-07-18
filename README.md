@@ -43,6 +43,34 @@ taski retry TASK_ID            Explicitly retry a failed or rejected task
 taski cancel TASK_ID           Cancel a pending/non-running task
 ```
 
+### Reminder management
+
+All reminder CRUD commands are restricted to the configured inbox. They accept a current EventKit reminder ID; `show`, `edit`, `complete`, `reopen`, and `delete` also accept a Taski task ID and use the ledger's external-identifier/fingerprint evidence to recover a changed local EventKit ID.
+
+```sh
+taski reminder create --title "report system" \
+  --notes "weekly check" \
+  --due "2026-07-18T09:00:00-07:00" \
+  --priority high \
+  --alarm "2026-07-18T08:45:00-07:00"
+
+taski reminder list            # incomplete reminders
+taski reminder list --all      # completed and incomplete
+taski reminder show REMINDER_OR_TASK_ID
+
+taski reminder edit REMINDER_OR_TASK_ID \
+  --title "run daily-report" \
+  --clear-notes --clear-due \
+  --priority low --clear-alarms
+
+taski reminder complete REMINDER_OR_TASK_ID
+taski reminder reopen REMINDER_OR_TASK_ID
+taski reminder delete REMINDER_OR_TASK_ID       # interactive confirmation
+taski reminder delete REMINDER_OR_TASK_ID --yes # non-interactive
+```
+
+Dates and alarms use RFC 3339 timestamps with an explicit offset. Priorities are `none`, `low`, `medium`, or `high`. The CLI currently exposes absolute date/time alarms; EventKit location and relative alarms remain untouched unless `--clear-alarms` is supplied. Editing a reminder—not its ledger row—is the supported way to change task content, and the daemon reparses the updated reminder through its normal safety policy.
+
 The daemon reconciles at startup, after debounced `EKEventStoreChanged` notifications, and every 60 seconds. Every notification causes a full refetch; EventKit objects are not cached. Reconciliation is serialized, processors time out after 120 seconds, and no failure is automatically retried forever. A task left `running` by a crash is marked failed for operator inspection rather than assumed safe to repeat.
 
 ## Security and recovery

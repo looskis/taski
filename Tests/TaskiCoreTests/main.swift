@@ -31,6 +31,7 @@ struct BehavioralTests {
 
         try await testLedgerBehavior()
         try await testReconciliationBehavior()
+        try await testReminderManagementBehavior()
         print("PASS all behavioral tests")
     }
 
@@ -102,6 +103,38 @@ struct BehavioralTests {
         _ = try? await restartedReconciler.reconcile(calendarIdentifier: "cal")
         try expect(try failureLedger.task(id: orphan.taskID)?.state == .failed, "orphaned running records must recover after restart")
     }
+
+    static func testReminderManagementBehavior() async throws {
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let ledger = try Ledger(path: path)
+        let store = FakeCRUDReminderStore()
+        let manager = ReminderManager(store: store, ledger: ledger, calendarIdentifier: "cal", sourceIdentifier: "source")
+        let due = Date(timeIntervalSince1970: 1_800_000_000)
+        let alarm = Date(timeIntervalSince1970: 1_799_996_400)
+
+        let created = try await manager.create(ReminderDraft(title: "report system", notes: "weekly", dueDate: due, priority: .high, alarms: [alarm]))
+        try expect(created.title == "report system" && created.priority == .high, "create should persist typed reminder fields")
+        let initialList = try await manager.list(includeCompleted: false)
+        let shown = try await manager.show(identifier: created.localIdentifier)
+        try expect(initialList.count == 1, "list should return configured-inbox reminders")
+        try expect(shown.notes == "weekly", "show should resolve a reminder identifier")
+
+        let edited = try await manager.edit(identifier: created.localIdentifier, patch: ReminderPatch(title: "run daily-report", notes: .clear, dueDate: .clear, priority: .low, addAlarms: [], clearAlarms: true))
+        try expect(edited.title == "run daily-report" && edited.notes == nil && edited.dueDate == nil && edited.priority == .low && edited.alarms.isEmpty, "edit should update and clear fields")
+        _ = try await manager.setCompleted(identifier: created.localIdentifier, completed: true)
+        let incompleteAfterCompletion = try await manager.list(includeCompleted: false)
+        try expect(incompleteAfterCompletion.isEmpty, "complete should hide an item from incomplete listing")
+        _ = try await manager.setCompleted(identifier: created.localIdentifier, completed: false)
+
+        let ledgerTask = try ledger.discover(created)
+        await store.changeLocalIdentifier(from: created.localIdentifier, to: "resynced-id")
+        let recoveredReminder = try await manager.show(identifier: ledgerTask.taskID)
+        try expect(recoveredReminder.localIdentifier == "resynced-id", "task IDs should recover reminders after a local identifier change")
+        try await manager.delete(identifier: ledgerTask.taskID)
+        let afterDeletion = try await manager.list(includeCompleted: true)
+        try expect(afterDeletion.isEmpty, "delete should remove the reminder")
+        print("PASS reminder management behavior")
+    }
 }
 
 actor FakeReminderStore: ReminderStore {
@@ -116,4 +149,30 @@ actor FakeReminderStore: ReminderStore {
         completedIdentifiers.append(localIdentifier)
     }
     func updateNote(localIdentifier: String, status: String) async throws {}
+}
+
+actor FakeCRUDReminderStore: ReminderCRUDStore {
+    private var reminders: [ReminderSnapshot] = []
+    func authorizationStatus() async -> ReminderAuthorization { .fullAccess }
+    func fetchAll(calendarIdentifier: String) async throws -> [ReminderSnapshot] { reminders.filter { $0.calendarIdentifier == calendarIdentifier } }
+    func create(calendarIdentifier: String, sourceIdentifier: String, draft: ReminderDraft) async throws -> ReminderSnapshot {
+        let reminder = ReminderSnapshot(localIdentifier: UUID().uuidString, externalIdentifier: UUID().uuidString, calendarIdentifier: calendarIdentifier, sourceIdentifier: sourceIdentifier, title: draft.title, notes: draft.notes, isCompleted: false, dueDate: draft.dueDate, priority: draft.priority, alarms: draft.alarms)
+        reminders.append(reminder); return reminder
+    }
+    func update(localIdentifier: String, calendarIdentifier: String, patch: ReminderPatch) async throws -> ReminderSnapshot {
+        guard let index = reminders.firstIndex(where: { $0.localIdentifier == localIdentifier && $0.calendarIdentifier == calendarIdentifier }) else { throw ProcessorError(code: "reminder_missing", message: "missing") }
+        reminders[index] = reminders[index].applying(patch); return reminders[index]
+    }
+    func setCompleted(localIdentifier: String, calendarIdentifier: String, completed: Bool) async throws -> ReminderSnapshot {
+        guard let index = reminders.firstIndex(where: { $0.localIdentifier == localIdentifier && $0.calendarIdentifier == calendarIdentifier }) else { throw ProcessorError(code: "reminder_missing", message: "missing") }
+        reminders[index] = reminders[index].withCompletion(completed); return reminders[index]
+    }
+    func delete(localIdentifier: String, calendarIdentifier: String) async throws {
+        guard let index = reminders.firstIndex(where: { $0.localIdentifier == localIdentifier && $0.calendarIdentifier == calendarIdentifier }) else { throw ProcessorError(code: "reminder_missing", message: "missing") }
+        reminders.remove(at: index)
+    }
+    func changeLocalIdentifier(from: String, to: String) {
+        guard let index = reminders.firstIndex(where: { $0.localIdentifier == from }) else { return }
+        reminders[index] = reminders[index].withLocalIdentifier(to)
+    }
 }

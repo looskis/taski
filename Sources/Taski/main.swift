@@ -13,6 +13,7 @@ struct TaskiCLI {
         let command = arguments.first ?? "help"
         let paths = AppPaths()
         switch command {
+        case "reminder": try await reminderCommand(paths: paths, arguments: Array(arguments.dropFirst()))
         case "setup": try await setup(paths: paths, arguments: Array(arguments.dropFirst()))
         case "probe": try await probe(request: arguments.contains("--request-access"))
         case "run-once": try await runOnce(paths: paths)
@@ -82,6 +83,55 @@ struct TaskiCLI {
         let ledger = try Ledger(path: paths.database.path)
         let registry = ProcessorRegistry.standard(reportDirectory: paths.reports)
         return (config, store, ledger, Reconciler(store: store, ledger: ledger, registry: registry, timeoutSeconds: Double(config.execution.defaultTimeoutSeconds), lockPath: paths.root.appendingPathComponent("reconcile.lock").path))
+    }
+
+    static func reminderCommand(paths: AppPaths, arguments: [String]) async throws {
+        guard let command = arguments.first else { throw ProcessorError(code: "missing_reminder_command", message: "Use `taski reminder help`.") }
+        if ["help", "--help", "-h"].contains(command) { reminderHelp(); return }
+        guard ["create", "list", "show", "edit", "complete", "reopen", "delete"].contains(command) else { throw ProcessorError(code: "unknown_reminder_command", message: "Unknown reminder command `\(command)`. Use `taski reminder help`.") }
+        let config = try paths.load()
+        let store = EventKitReminderStore()
+        let ledger = try Ledger(path: paths.database.path)
+        let manager = ReminderManager(store: store, ledger: ledger, calendarIdentifier: config.reminders.calendarIdentifier, sourceIdentifier: config.reminders.sourceIdentifier)
+        let remainder = Array(arguments.dropFirst())
+        switch command {
+        case "create":
+            let options = try CLIOptions(remainder, values: ["--title", "--notes", "--due", "--priority", "--alarm"], flags: [])
+            let title = try options.required("--title")
+            let draft = ReminderDraft(title: title, notes: try options.single("--notes"), dueDate: try options.single("--due").map(parseDate), priority: try options.single("--priority").map(parsePriority) ?? .none, alarms: try options.all("--alarm").map(parseDate))
+            printReminder(try await manager.create(draft))
+        case "list":
+            let options = try CLIOptions(remainder, values: [], flags: ["--all"])
+            let reminders = try await manager.list(includeCompleted: options.has("--all"))
+            if reminders.isEmpty { print("No reminders in the configured inbox.") }
+            for reminder in reminders { print("\(reminder.localIdentifier)  \(reminder.isCompleted ? "completed" : "incomplete")  \(reminder.title)") }
+        case "show":
+            guard remainder.count == 1 else { throw usage("show requires one reminder or task ID") }
+            printReminder(try await manager.show(identifier: remainder[0]))
+        case "edit":
+            guard let identifier = remainder.first, !identifier.hasPrefix("--") else { throw usage("edit requires a reminder or task ID") }
+            let options = try CLIOptions(Array(remainder.dropFirst()), values: ["--title", "--notes", "--due", "--priority", "--alarm"], flags: ["--clear-notes", "--clear-due", "--clear-alarms"])
+            guard options.hasMutation else { throw usage("edit requires at least one field option") }
+            if options.has("--clear-notes") && options.contains("--notes") { throw usage("use either --notes or --clear-notes") }
+            if options.has("--clear-due") && options.contains("--due") { throw usage("use either --due or --clear-due") }
+            let notes: ReminderFieldUpdate<String> = options.has("--clear-notes") ? .clear : try options.single("--notes").map(ReminderFieldUpdate.set) ?? .unchanged
+            let dueDate: ReminderFieldUpdate<Date> = options.has("--clear-due") ? .clear : try options.single("--due").map { .set(try parseDate($0)) } ?? .unchanged
+            let patch = ReminderPatch(title: try options.single("--title"), notes: notes, dueDate: dueDate, priority: try options.single("--priority").map(parsePriority), addAlarms: try options.all("--alarm").map(parseDate), clearAlarms: options.has("--clear-alarms"))
+            printReminder(try await manager.edit(identifier: identifier, patch: patch))
+        case "complete", "reopen":
+            guard remainder.count == 1 else { throw usage("\(command) requires one reminder or task ID") }
+            printReminder(try await manager.setCompleted(identifier: remainder[0], completed: command == "complete"))
+        case "delete":
+            guard let identifier = remainder.first, !identifier.hasPrefix("--") else { throw usage("delete requires a reminder or task ID") }
+            let options = try CLIOptions(Array(remainder.dropFirst()), values: [], flags: ["--yes"])
+            if !options.has("--yes") {
+                print("Permanently delete this reminder from the configured inbox? [y/N]: ", terminator: "")
+                guard ["y", "yes"].contains((readLine() ?? "").lowercased()) else { throw ProcessorError(code: "delete_cancelled", message: "Reminder was not deleted.") }
+            }
+            try await manager.delete(identifier: identifier)
+            print("Deleted reminder \(identifier).")
+        default: preconditionFailure("validated reminder command was not handled")
+        }
     }
 
     static func runOnce(paths: AppPaths) async throws {
@@ -156,11 +206,28 @@ struct TaskiCLI {
     static func requiredID(_ args: [String]) throws -> String { guard args.count == 2 else { throw ProcessorError(code: "missing_task_id", message: "This command requires one task ID.") }; return args[1] }
     static func option(_ name: String, in args: [String]) -> String? { guard let index = args.firstIndex(of: name), args.indices.contains(index + 1) else { return nil }; return args[index + 1] }
     static func safeCode(_ error: Error) -> String { (error as? ProcessorError)?.code ?? "unknown" }
+    static func parseDate(_ value: String) throws -> Date {
+        let fractional = ISO8601DateFormatter(); fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let standard = ISO8601DateFormatter(); standard.formatOptions = [.withInternetDateTime]
+        guard let date = fractional.date(from: value) ?? standard.date(from: value) else { throw ProcessorError(code: "invalid_date", message: "Use an RFC 3339 timestamp such as 2026-07-18T09:00:00-07:00.") }
+        return date
+    }
+    static func parsePriority(_ value: String) throws -> ReminderPriority {
+        guard let priority = ["none": ReminderPriority.none, "low": .low, "medium": .medium, "high": .high][value.lowercased()] else { throw ProcessorError(code: "invalid_priority", message: "Priority must be none, low, medium, or high.") }
+        return priority
+    }
+    static func printReminder(_ reminder: ReminderSnapshot) {
+        let formatter = ISO8601DateFormatter()
+        print("id: \(reminder.localIdentifier)\nexternal_id: \(reminder.externalIdentifier ?? "none")\nstate: \(reminder.isCompleted ? "completed" : "incomplete")\ntitle: \(reminder.title)\nnotes: \(reminder.notes ?? "none")\ndue: \(reminder.dueDate.map(formatter.string) ?? "none")\npriority: \(String(describing: reminder.priority))")
+        if reminder.alarms.isEmpty { print("alarms: none") } else { for alarm in reminder.alarms { print("alarm: \(formatter.string(from: alarm))") } }
+    }
+    static func usage(_ detail: String) -> ProcessorError { ProcessorError(code: "invalid_arguments", message: "\(detail). Use `taski reminder help`.") }
     static func log(event: String, fields: [String: String]) { var value = fields; value["event"] = event; value["time"] = ISO8601DateFormatter().string(from: Date()); if let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), let line = String(data: data, encoding: .utf8) { print(line) } }
     static func help() { print("""
     taski — safe Reminders task daemon
 
       setup                 Request access and select an inbox list
+      reminder ...          Create, read, edit, complete, reopen, or delete reminders
       probe [--request-access]  Inspect lists and observe changes
       run-once              Reconcile immediately
       daemon                Run notification and timer reconciliation
@@ -168,6 +235,46 @@ struct TaskiCLI {
       inspect TASK_ID       Show one task and its audit history
       approve TASK_ID       Explicitly approve and run a task
       retry TASK_ID         Explicitly retry a failed/rejected task
-      cancel TASK_ID        Cancel a task locally
+      cancel TASK_ID        Cancel a pending/non-running task
     """) }
+    static func reminderHelp() { print("""
+    taski reminder — manage only the configured inbox
+
+      create --title TEXT [--notes TEXT] [--due RFC3339] [--priority LEVEL] [--alarm RFC3339 ...]
+      list [--all]
+      show REMINDER_OR_TASK_ID
+      edit REMINDER_OR_TASK_ID [--title TEXT] [--notes TEXT|--clear-notes]
+           [--due RFC3339|--clear-due] [--priority LEVEL]
+           [--alarm RFC3339 ...] [--clear-alarms]
+      complete REMINDER_OR_TASK_ID
+      reopen REMINDER_OR_TASK_ID
+      delete REMINDER_OR_TASK_ID [--yes]
+
+    Priorities: none, low, medium, high. Alarms are absolute date/time alarms.
+    """) }
+}
+
+private struct CLIOptions {
+    private var valueMap: [String: [String]] = [:]
+    private var flagSet: Set<String> = []
+
+    init(_ arguments: [String], values: Set<String>, flags: Set<String>) throws {
+        var index = 0
+        while index < arguments.count {
+            let argument = arguments[index]
+            if flags.contains(argument) { flagSet.insert(argument); index += 1; continue }
+            guard values.contains(argument) else { throw TaskiCLI.usage("unknown option `\(argument)`") }
+            guard arguments.indices.contains(index + 1) else { throw TaskiCLI.usage("\(argument) requires a value") }
+            valueMap[argument, default: []].append(arguments[index + 1]); index += 2
+        }
+    }
+
+    var hasMutation: Bool { !valueMap.isEmpty || !flagSet.isEmpty }
+    func has(_ name: String) -> Bool { flagSet.contains(name) }
+    func contains(_ name: String) -> Bool { valueMap[name] != nil }
+    func all(_ name: String) -> [String] { valueMap[name] ?? [] }
+    func single(_ name: String) throws -> String? {
+        let values = all(name); guard values.count <= 1 else { throw TaskiCLI.usage("\(name) may be supplied only once") }; return values.first
+    }
+    func required(_ name: String) throws -> String { guard let value = try single(name) else { throw TaskiCLI.usage("\(name) is required") }; return value }
 }
