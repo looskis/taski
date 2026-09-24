@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/taski-icon.png" alt="Taski logo" width="128" height="128">
+</p>
+
 # Taski
 
 Taski is a per-user macOS background daemon and CLI that turns one dedicated iCloud Reminders list into a strict, durable task inbox. It has no graphical Mac app. The headless `.app` bundle exists only to give the daemon a stable signed identity for macOS Reminders permission and LaunchAgent execution. Taski uses public EventKit APIs, never evaluates reminder text as shell code, records state changes in SQLite, and completes a reminder only after its processor succeeds.
